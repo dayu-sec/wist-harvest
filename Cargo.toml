@@ -1,0 +1,38 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/harvest-core",
+    "crates/harvest-tencent",
+    "crates/harvest-warp",
+    "crates/harvest-app",
+]
+
+[workspace.package]
+version = "0.1.0" #@gxl:set(version)
+edition = "2024"
+publish = false
+license = "Apache-2.0"
+
+[workspace.dependencies]
+harvest-core = { path = "crates/harvest-core" }
+harvest-tencent = { path = "crates/harvest-tencent" }
+harvest-warp = { path = "crates/harvest-warp" }
+
+async-trait = "0.1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+clap = { version = "4", features = ["derive"] }
+hex = "0.4"
+hmac = "0.12"
+libc = "0.2"
+reqwest = { version = "0.13", features = ["json", "http2"] }
+rustls = "0.23"
+rustls-pki-types = { version = "1", features = ["std"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tempfile = "3"
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "io-util", "net", "sync", "fs"] }
+tokio-rustls = "0.26"
+toml = "1"
+webpki-roots = "0.26"

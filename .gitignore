@@ -1,0 +1,6 @@
+/target
+/.run*
+_gal/.report/
+_gal/.run*
+.spool/
+.state/

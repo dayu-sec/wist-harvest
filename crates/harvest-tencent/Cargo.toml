@@ -1,0 +1,22 @@
+[package]
+name = "harvest-tencent"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[dependencies]
+harvest-core.workspace = true
+async-trait.workspace = true
+chrono.workspace = true
+hex.workspace = true
+hmac.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "io-util", "net", "sync", "fs"] }

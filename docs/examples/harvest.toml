@@ -1,0 +1,53 @@
+# 服务配置：/etc/wist-harvest/harvest.toml
+#
+# 所有值都可以不写（有默认值），但生产环境建议显式写全，便于评审。
+
+[service]
+# 批次暂存目录：收齐之前不发送。
+spool_dir = "/var/lib/wist-harvest/spool"
+# 运行态：租约锁、运行报告。
+state_dir = "/var/lib/wist-harvest/state"
+# 每页条数。EIP/VPC/子网都是同一档。
+page_size = 100
+# 单帧上限。超限即 Aborted；应推动下游支持分片组装，而不是拆 snap_id。
+max_frame_bytes = 33554432
+# 单次响应体上限。
+max_response_bytes = 16777216
+# 单个 HTTP 请求超时。
+request_timeout_ms = 30000
+# P0 顺序采集，留字段避免下一阶段改配置结构。
+concurrency = 1
+# 是否允许"云端确实为空"时发空数组快照。默认 false：空 ≠ 失败。
+allow_empty = false
+
+[retry]
+# 限流 / 5xx / 网络可重试；鉴权 / 参数 / 响应超限不重试。
+max_attempts = 4
+base_delay_ms = 200
+max_delay_ms = 5000
+
+[rate]
+# 按 action 维度的令牌桶；下面是兜底档位。
+default_qps = 5.0
+default_burst = 5.0
+
+# 覆盖单个 action 的档位（可选）。
+# [rate.actions]
+# DescribeInstances = { qps = 20.0, burst = 10.0 }
+# DescribeAddresses = { qps = 10.0, burst = 5.0 }
+# DescribeVpcs      = { qps = 10.0, burst = 5.0 }
+# DescribeSubnets   = { qps = 10.0, burst = 5.0 }
+
+[sink]
+# 数据平面端点，host:port。
+endpoint = "warp-parse:9100"
+# 明文 TCP。只给本地 mock 或受控内网调试用，生产必须 false。
+allow_plaintext = false
+# 私有 CA；不配则用 webpki 公共根。
+# ca_file = "/etc/wist-harvest/tls/ca.pem"
+# mTLS 客户端证书（两个必须同时配或同时留空）。
+# cert_file = "/etc/wist-harvest/tls/client.pem"
+# key_file = "/etc/wist-harvest/tls/client.key"
+connect_timeout_ms = 5000
+ack_timeout_ms = 15000
+publish_attempts = 3

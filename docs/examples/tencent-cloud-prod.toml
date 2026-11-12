@@ -1,0 +1,35 @@
+# 数据源定义：/etc/wist-harvest/sources.d/<source_code>.toml
+#
+# source_code 是已登记的数据源编码，换实现（Java → Rust）**不能换**这个值：
+# 下游按它做资源匹配与作用域隔离。
+
+source_code = "tencent-cloud-prod"
+tenant_id = "tenant-example"
+group = "inventory"
+env_ref = "prod"
+
+# 地域范围：
+#   "auto"  → 运行时用 DescribeRegions 解析（只取 AVAILABLE）
+#   列 表   → 固定范围，此时可用 region_names 补充显示名
+regions = "auto"
+# regions = ["ap-guangzhou", "ap-shanghai"]
+# [region_names]
+# ap-guangzhou = "华南地区(广州)"
+# ap-shanghai  = "华东地区(上海)"
+
+[assets]
+cloud_host = true
+eip = true
+vpc = true
+subnet = true
+
+# 凭据：只写"从哪读"，永远不写值。
+# 二选一，且只能写一个。file 必须是 0600。
+[credential]
+secret_id = { env = "SEC_TENCENT_SECRET_ID" }
+secret_key = { env = "SEC_TENCENT_SECRET_KEY" }
+# secret_id  = { file = "/etc/wist-harvest/secrets/tencent.json", field = "secret_id" }
+# secret_key = { file = "/etc/wist-harvest/secrets/tencent.json", field = "secret_key" }
+
+# 仅测试/联调用：把四个 API 的 host 指向同一个 base URL。
+# endpoint_override = "http://127.0.0.1:18080"
