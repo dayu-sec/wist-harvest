@@ -520,6 +520,13 @@ pub struct SourceConfig {
     pub region_names: BTreeMap<String, String>,
     #[serde(default)]
     pub assets: AssetToggles,
+    /// 账单账号 UIN（`100041355715`）。**账单接口按 UIN 记账**，跟凭据里的
+    /// SecretId 没有推导关系，所以必须显式写；只有跑成本链路时才必需。
+    #[serde(default)]
+    pub billing_account_uin: Option<String>,
+    /// 成本链路配置（`[cost]`）。没写就用默认值。
+    #[serde(default)]
+    pub cost: CostConfig,
     pub credential: CredentialRefs,
     /// 仅测试/联调用：把四个 API 的 host 全部指向同一个 base URL。
     #[serde(default)]
@@ -528,6 +535,44 @@ pub struct SourceConfig {
 
 fn default_env_ref() -> String {
     "prod".to_string()
+}
+
+/// 成本链路（契约 `harvest-cost-v1`）。
+///
+/// 成本不走数据平面，所以这里只有「分片写到哪、用什么币种」两种配置，
+/// 不涉及 sink / 帧大小。
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CostConfig {
+    /// 币种（契约要求三位大写）。国内账号是 CNY；组件上带 `Currency` 时以组件为准。
+    #[serde(default = "default_cost_currency")]
+    pub currency: String,
+    /// 分片根目录。`None` = `<state_dir>/cost`。
+    ///
+    /// 目录布局必须与 `wist-cost` 的 `ShardKeyLayout` 逐字一致，否则消费方找不到分片。
+    #[serde(default)]
+    pub output_dir: Option<PathBuf>,
+    /// 单分片行数。默认 20000（分片够大少对象，又不至于一次读不进内存）。
+    #[serde(default = "default_rows_per_shard")]
+    pub rows_per_shard: u64,
+}
+
+fn default_cost_currency() -> String {
+    "CNY".to_string()
+}
+
+fn default_rows_per_shard() -> u64 {
+    crate::cost::DEFAULT_ROWS_PER_SHARD
+}
+
+impl Default for CostConfig {
+    fn default() -> Self {
+        Self {
+            currency: default_cost_currency(),
+            output_dir: None,
+            rows_per_shard: default_rows_per_shard(),
+        }
+    }
 }
 fn default_group() -> String {
     GROUP_INVENTORY.to_string()

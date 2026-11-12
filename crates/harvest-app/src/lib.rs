@@ -4,6 +4,7 @@
 //! lib 里，便于集成测试直接断言（尤其是退出码与"无凭据泄漏"）。
 
 pub mod cli;
+pub mod cost;
 pub mod diagnose;
 pub mod dryrun;
 pub mod once;

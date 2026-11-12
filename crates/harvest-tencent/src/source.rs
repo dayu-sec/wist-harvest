@@ -25,7 +25,7 @@ use harvest_core::spool::{Manifest, Spool};
 use serde_json::{Value, json};
 
 use crate::client::{ApiAction, ClientOptions, RetrySpec, TencentClient};
-use crate::readers::{MapContext, PageSpec, cvm, eip, network, paginate};
+use crate::readers::{MapContext, PageSpec, billing, cvm, eip, network, paginate};
 use crate::value::{as_i64, as_str};
 
 pub const DESCRIBE_REGIONS: ApiAction = ApiAction {
@@ -155,6 +155,30 @@ impl TencentSource {
 
     pub fn config(&self) -> &SourceConfig {
         &self.cfg
+    }
+
+    /// 账号键 `vendor:AccountId`（取不到就是 `None`）。
+    pub fn account_key(&self) -> Option<&str> {
+        self.account.as_deref()
+    }
+
+    /// 抓一个成本范围，逐行交给 `on_row`（有界内存，边抓边写分片）。
+    ///
+    /// 与资产采集分开：成本不走 spool / 数据平面，也不吃 `verify` 那套「帧完整性」
+    /// （分片自身的 `sha256` + 行数就是它的完整性证据）。
+    ///
+    /// `billing_account_uin` 从运行时的 `--account` 或账号解析结果里取，见
+    /// [`TencentSource::account_key`]：`tencent:100041355715` 取后段，
+    /// 因为账单接口的口径是 UIN，不是 `vendor:uin` 组合键。
+    pub async fn fetch_cost<F>(
+        &self,
+        range: &harvest_core::cost::CostRange,
+        mut on_row: F,
+    ) -> Result<billing::BillFetchStat, HarvestError>
+    where
+        F: FnMut(&serde_json::Map<String, serde_json::Value>) -> Result<(), HarvestError>,
+    {
+        billing::fetch_range(&self.client, range, &mut on_row).await
     }
 
     async fn resolve_regions(&self) -> Result<Vec<RegionEntry>, HarvestError> {

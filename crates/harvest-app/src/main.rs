@@ -5,6 +5,7 @@
 //! - `once`：跑一轮采集（租约 → 抓取 → 校验 → 发布）；
 //! - `run`：常驻调度，按 `--run-at`（默认 00:30 Asia/Shanghai）或 `--interval` 反复跑；
 //! - `dry-run`：只打印生效配置与采集计划，不联网、不写 spool；
+//! - `cost`：抓一个账期范围的账单，落分片 + manifest（契约 `harvest-cost-v1`，不进数据平面）；
 //! - `diagnose`：容器 healthcheck，离线分项自检。
 
 use std::path::PathBuf;
@@ -82,6 +83,22 @@ enum Command {
         config: PathBuf,
         #[arg(long)]
         source: PathBuf,
+    },
+    /// 抓一个账期范围的账单：分片 + manifest（成本不进数据平面）。
+    Cost {
+        #[arg(long)]
+        config: PathBuf,
+        #[arg(long)]
+        source: PathBuf,
+        /// 整月账单（`CHARGE`），格式 `YYYY-MM`。默认上一个自然月。
+        #[arg(long, value_name = "YYYY-MM", conflicts_with = "day")]
+        month: Option<String>,
+        /// 单日消耗（`CONSUMPTION`），格式 `YYYY-MM-DD`。
+        #[arg(long, value_name = "YYYY-MM-DD")]
+        day: Option<String>,
+        /// 分片根目录（默认数据源 `[cost].output_dir`，再退回 `<state_dir>/cost`）。
+        #[arg(long)]
+        output_dir: Option<PathBuf>,
     },
     /// 自检（容器 healthcheck 可用）：离线、非交互、不输出凭据。
     Diagnose {
@@ -184,6 +201,13 @@ fn main() {
                 // 优雅退出：无论最后一轮是 Done 还是 Aborted，退出码都是 0。
                 0
             }
+            Command::Cost {
+                config,
+                source,
+                month,
+                day,
+                output_dir,
+            } => harvest_app::cost::run(config, source, month, day, output_dir).await,
             Command::DryRun { config, source } => harvest_app::dryrun::run(&config, &source),
             Command::Diagnose {
                 config,

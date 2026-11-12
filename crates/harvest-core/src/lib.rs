@@ -6,6 +6,7 @@
 
 pub mod assemble;
 pub mod config;
+pub mod cost;
 pub mod error;
 pub mod integrity;
 pub mod lease;

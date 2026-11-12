@@ -6,6 +6,7 @@
 //! - `DescribeVpcs`、`DescribeSubnets` 用**字符串**形式的 `Limit`/`Offset`
 //!   （沿用既有实现；见 [`PageSpec::limit_as_string`]）。
 
+pub mod billing;
 pub mod cvm;
 pub mod eip;
 pub mod network;

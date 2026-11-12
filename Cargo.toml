@@ -19,7 +19,7 @@ harvest-tencent = { path = "crates/harvest-tencent" }
 harvest-warp = { path = "crates/harvest-warp" }
 
 async-trait = "0.1"
-chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+chrono = { version = "0.4", default-features = false, features = ["clock", "std", "serde"] }
 clap = { version = "4", features = ["derive"] }
 hex = "0.4"
 hmac = "0.12"

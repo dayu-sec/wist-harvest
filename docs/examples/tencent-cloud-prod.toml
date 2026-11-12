@@ -17,6 +17,16 @@ regions = "auto"
 # ap-guangzhou = "华南地区(广州)"
 # ap-shanghai  = "华东地区(上海)"
 
+# 账单账号 UIN。账单接口按 UIN 记账，跟凭据（SecretId）没有推导关系，
+# 所以必须显式写；只有跑 `cost` 子命令时才必需。
+billing_account_uin = "100041355715"
+
+# 成本链路（契约 harvest-cost-v1）。不走数据平面，只写分片 + manifest。
+[cost]
+currency = "CNY"
+# output_dir 不写就落到 <state_dir>/cost
+rows_per_shard = 20000
+
 [assets]
 cloud_host = true
 eip = true

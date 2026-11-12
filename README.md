@@ -24,7 +24,37 @@ wist-harvest ──原生快照帧──► warp-parse ──atlas.in.<family>.v
 - 状态机 `Planned → Fetching → Spooled → Verified → Published → Done`，
   任一步失败进 `Aborted` 且**数据平面零帧**。
 - 凭据只从 `${SEC_*}` 或 0600 文件读，任何日志/报告/错误都过统一的脱敏器。
-- 不做：成本 reader（下一阶段）、安全组/路由/CLB、任何 git 操作。
+- 不做：安全组/路由/CLB、任何 git 操作。
+
+## 成本链路（并列主干，不进数据平面）
+
+成本不是资产的一类：它是事实表，O(资源×天×18 个月)，要按范围替换与月聚合，
+所以**不走数据平面**（设计 §7.1）。harvest 只做「云 → 分片 + manifest」，
+`wist-cost` 在计算区按 manifest 入账，atlas 不参与。
+
+| 类型 | 云 API | 备注 |
+| --- | --- | --- |
+| 账单明细 | `billing.DescribeBillDetail`（2018-07-09） | 单页上限 **300**（1000 会被 `#Limit` 拒）；按 `bill_month` 整月拉一遍，日口径在本地筛 |
+
+```bash
+# 整月账单（CHARGE），默认上一个自然月
+wist-harvest cost --config ... --source ... --month 2026-10 --output-dir /data/cost
+
+# 单日消耗（CONSUMPTION）
+wist-harvest cost --config ... --source ... --day 2026-10-15 --output-dir /data/cost
+```
+
+产物（与 `wist-cost` 的 `ShardKeyLayout` 逐字一致）：
+
+```
+<output_dir>/cost/{tenant}/{vendor}/{cost_basis}/{yyyy}/{MM}/0001.ndjson
+<output_dir>/cost/{tenant}/{vendor}/{cost_basis}/{yyyy}/{MM}/manifest.json
+```
+
+三条不能松的口子：分片**不可变**（补采 = 新 `batch_id`）、金额全程十进制字符串
+（`DecimalSum`，不碰浮点）、`null`（未知）与 `"0"`（确认为零）严格区分。
+归日用**账单归属日 `BillDay`**，不是 `PayTime` —— 月底结算跨零点，按付款时刻归日
+会把 10 月的行推到 11 月，而 11 月的查询不包含它们。
 
 ## 目录
 
@@ -204,7 +234,7 @@ spool/state 目录可写、数据平面端点可解析、是否有可续跑 spoo
 
 ## TODO（明确没做）
 
-- 成本 reader（`DescribeCostDetail` 等）与 `harvest-cost-v1` 契约的分片落盘；
+- 成本：18 个月回填的编排（现在是「一个范围跑一次」，外层脚本串）；COS 直传（现在只写本地目录）；
 - `exposure` 组（安全组 + 规则、路由、对等连接、NAT/CCN、CLB）；
 - `env_ref` 的语义（设计 §9 缺口 3）：当前按配置直传，不做账号/项目/VPC 的切分推导；
 - `harvest_*` Prometheus 指标（报告已落盘，指标端点未接）；
