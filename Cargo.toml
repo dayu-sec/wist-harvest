@@ -26,7 +26,7 @@ clap = { version = "4", features = ["derive"] }
 hex = "0.4"
 hmac = "0.12"
 libc = "0.2"
-quick-xml = { version = "0.41", features = ["serialize"] }
+quick-xml = { version = "0.42", features = ["serialize"] }
 reqwest = { version = "0.13", features = ["json", "http2"] }
 rustls = "0.23"
 rustls-pki-types = { version = "1", features = ["std"] }
