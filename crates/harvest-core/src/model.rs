@@ -475,7 +475,6 @@ impl Stats {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct NativeSnapshot {
     pub schema_native: String,
-    pub tenant_id: String,
     pub source_code: String,
     pub env_ref: String,
     pub snap_id: String,

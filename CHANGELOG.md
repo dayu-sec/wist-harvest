@@ -3,6 +3,28 @@
 本文件记录 `wist-harvest` 的所有重要变更。格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.2.0-alpha] - 2026-11-13
+
+**采集器不再认识客户 / 租户。**
+
+一个网关（数据面）只服务一个客户，客户身份由**发送通道**在入库时打上（wparse 的全局 tag
+`tenant_id`，来自 gwlinkd 写入的 `WIST_TENANT_ID`），OML 用它拼 `cust_id` 投给 atlas。
+采集器不需要、也不应该知道它 —— 旧设计把客户写进采集配置，等于把「一个客户一套采集器」
+焊在配置里，而且换绑时在途快照会被打上新客户。
+
+### 不兼容
+
+- **`sources.d/<source_code>.toml` 里的 `tenant_id` 删掉**。`deny_unknown_fields` 下留着它
+  会直接解析失败；启用判据改由栈侧的 `HARVEST_ENABLED` 决定（不再拿「租户非空」当开关）。
+- **spool 目录**：`<spool>/<tenant>/<producer>/<snap_id>/` → `<spool>/<producer>/<snap_id>/`；
+  租约文件同理去掉租户段。旧运行态目录不再被复用（清掉 `harvest-run/{spool,state}` 即可）。
+- **快照体少一个 `tenant_id`**（`wist.harvest.snapshot.v1` 内容变化）：数据面的 WPL/OML 与
+  atlas 的 inventory 适配器都**不读**它，故无消费方受影响。
+- **成本产物**：`cost/{tenant}/{vendor}/…` → `cost/{vendor}/…`，manifest 的 `range` 少一个
+  `tenant`；账号 → 客户 的映射下沉到 `wist-cost`（用 `billing_account_uin`）。
+
+运行报告与 `--dry-run` 输出也不再带 `tenant_id`（保留 `source_code` / `vendor` / `producer`）。
+
 ## [0.1.1-alpha] - 2026-11-13
 
 除版本号外**没有行为变化**。这次发布是为了把上一版没走到的制品路径走一遍：

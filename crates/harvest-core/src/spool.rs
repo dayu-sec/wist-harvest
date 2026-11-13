@@ -1,6 +1,6 @@
 //! spool：采集结果先落本地，**收齐之前不发送**。
 //!
-//! 目录：`<spool_root>/<tenant>/<producer>/<snap_id>/`
+//! 目录：`<spool_root>/<producer>/<snap_id>/`
 //!
 //! ```text
 //! manifest.json
@@ -31,7 +31,6 @@ use crate::state::RunState;
 pub struct Manifest {
     pub schema: String,
     pub snap_id: String,
-    pub tenant_id: String,
     pub source_code: String,
     pub producer: String,
     pub group: String,
@@ -208,7 +207,6 @@ impl Spool {
         let manifest = Manifest {
             schema: crate::SCHEMA_SPOOL_MANIFEST.to_string(),
             snap_id: snap_id.to_string(),
-            tenant_id: scope.tenant_id.clone(),
             source_code: scope.source_code.clone(),
             producer: scope.producer(),
             group: scope.group.clone(),

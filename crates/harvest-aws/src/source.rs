@@ -367,7 +367,6 @@ mod tests {
         SourceConfig::parse(
             r#"
 source_code = "aws-prod"
-tenant_id = "tenant-example"
 vendor = "aws"
 regions = ["us-east-1", "ap-east-1"]
 

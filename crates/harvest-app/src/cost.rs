@@ -97,7 +97,6 @@ pub async fn run(
         "command": "cost",
         "batch_id": batch_id,
         "range": {
-            "tenant": range.tenant,
             "source_code": range.source_code,
             "vendor": range.vendor.as_str(),
             "billing_account_uin": range.billing_account_uin,
@@ -154,7 +153,6 @@ fn build_range(
     };
 
     let range = CostRange {
-        tenant: cfg.source.tenant_id.clone(),
         source_code: cfg.source.source_code.clone(),
         vendor: Vendor::TencentCloud,
         billing_account_uin,

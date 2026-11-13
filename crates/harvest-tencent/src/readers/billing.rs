@@ -271,7 +271,6 @@ mod tests {
 
     fn range(basis: CostBasis, start: (i32, u32, u32), end: (i32, u32, u32)) -> CostRange {
         CostRange {
-            tenant: "DEV-X4".into(),
             source_code: "tencent-cloud-prod".into(),
             vendor: Vendor::TencentCloud,
             billing_account_uin: "100041355715".into(),

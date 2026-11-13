@@ -201,7 +201,6 @@ impl Source for FailingSource {
         regions.sort();
         regions.dedup();
         Scope::new(
-            "tenant-example",
             "tencent-cloud-prod",
             "inventory",
             "prod",
@@ -275,7 +274,6 @@ async fn aborted_run_sends_zero_frames_over_the_wire() {
     let sink = plaintext_sink(&server.endpoint);
 
     let scope = Scope::new(
-        "tenant-example",
         "tencent-cloud-prod",
         "inventory",
         "prod",
@@ -312,7 +310,6 @@ async fn successful_run_sends_exactly_one_frame() {
     );
     let sink = plaintext_sink(&server.endpoint);
     let scope = Scope::new(
-        "tenant-example",
         "tencent-cloud-prod",
         "inventory",
         "prod",

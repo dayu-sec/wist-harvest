@@ -76,7 +76,6 @@ pub fn run(config_path: &Path, source_path: &Path) -> i32 {
         },
         "source": {
             "source_code": source_cfg.source_code,
-            "tenant_id": source_cfg.tenant_id,
             "group": source_cfg.group,
             "env_ref": source_cfg.env_ref,
             "producer": format!("{}:{}", source_cfg.source_code, source_cfg.group),

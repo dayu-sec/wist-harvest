@@ -39,7 +39,6 @@ pub struct RunReport {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScopeReport {
-    pub tenant_id: String,
     pub source_code: String,
     pub producer: String,
     pub group: String,
@@ -114,7 +113,6 @@ impl ErrorEntry {
 impl ScopeReport {
     pub fn from_scope(scope: &Scope) -> Self {
         Self {
-            tenant_id: scope.tenant_id.clone(),
             source_code: scope.source_code.clone(),
             producer: scope.producer(),
             group: scope.group.clone(),
@@ -128,7 +126,6 @@ impl ScopeReport {
 impl RunReport {
     pub fn from_manifest(manifest: &Manifest) -> ScopeReport {
         ScopeReport {
-            tenant_id: manifest.tenant_id.clone(),
             source_code: manifest.source_code.clone(),
             producer: manifest.producer.clone(),
             group: manifest.group.clone(),

@@ -85,7 +85,6 @@ pub fn build_snapshot(
 
     let snapshot = NativeSnapshot {
         schema_native: crate::SCHEMA_NATIVE.to_string(),
-        tenant_id: manifest.tenant_id.clone(),
         source_code: manifest.source_code.clone(),
         env_ref: manifest.env_ref.clone(),
         snap_id: manifest.snap_id.clone(),

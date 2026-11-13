@@ -76,8 +76,8 @@ wist-harvest cost --config ... --source ... --day 2026-10-15 --output-dir /data/
 产物（与 `wist-cost` 的 `ShardKeyLayout` 逐字一致）：
 
 ```
-<output_dir>/cost/{tenant}/{vendor}/{cost_basis}/{yyyy}/{MM}/0001.ndjson
-<output_dir>/cost/{tenant}/{vendor}/{cost_basis}/{yyyy}/{MM}/manifest.json
+<output_dir>/cost/{vendor}/{cost_basis}/{yyyy}/{MM}/0001.ndjson
+<output_dir>/cost/{vendor}/{cost_basis}/{yyyy}/{MM}/manifest.json
 ```
 
 发布顺序是**先暂存、后入位**：抓取期间分片只落在同目录的 `.staging-<batch_id>/`，
@@ -291,7 +291,7 @@ spool/state 目录可写、数据平面端点可解析、是否有可续跑 spoo
 ## spool 目录
 
 ```
-<spool_dir>/<tenant>/<producer>/<snap_id>/
+<spool_dir>/<producer>/<snap_id>/
   manifest.json                                   # 原子写（tmp + rename）
   items/CLOUD_HOST/ap-guangzhou.default.ndjson
   items/EIP/ap-guangzhou.wanip.ndjson             # Filters=[address-type=WanIP]

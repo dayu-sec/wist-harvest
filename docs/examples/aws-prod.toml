@@ -8,7 +8,6 @@
 # 同样的采集组、同样的规范字段、同样的快照帧；区别全在 `harvest-aws` 里。
 
 source_code = "aws-prod"
-tenant_id = "tenant-example"
 vendor = "AWS"
 group = "inventory"
 env_ref = "prod"

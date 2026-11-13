@@ -59,14 +59,10 @@ impl From<std::io::Error> for LeaseError {
     }
 }
 
-/// 拿租约。范围粒度：`tenant + producer`。
+/// 拿租约。范围粒度：`producer`。
 pub fn acquire(lease_dir: &Path, scope: &Scope) -> Result<Lease, LeaseError> {
     std::fs::create_dir_all(lease_dir)?;
-    let name = format!(
-        "{}-{}.lock",
-        sanitize(&scope.tenant_id),
-        sanitize(&scope.producer())
-    );
+    let name = format!("{}.lock", sanitize(&scope.producer()));
     let path = lease_dir.join(name);
     let mut file = OpenOptions::new()
         .create(true)
@@ -106,7 +102,6 @@ mod tests {
 
     fn scope() -> Scope {
         Scope::new(
-            "tenant-example",
             "tencent-cloud-prod",
             "inventory",
             "prod",

@@ -117,7 +117,6 @@ mod tests {
         Manifest {
             schema: crate::SCHEMA_SPOOL_MANIFEST.to_string(),
             snap_id: "snap".into(),
-            tenant_id: "t".into(),
             source_code: "s".into(),
             producer: "s:inventory".into(),
             group: "inventory".into(),

@@ -532,7 +532,6 @@ mod tests {
         SourceConfig::parse(
             r#"
 source_code = "tencent-cloud-prod"
-tenant_id = "tenant-example"
 vendor = "TENCENT_CLOUD"
 regions = ["ap-guangzhou", "ap-shanghai"]
 

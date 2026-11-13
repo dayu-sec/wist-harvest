@@ -1,4 +1,7 @@
-//! 范围身份：采集组 + 租户 + 数据源 + 地域集合。
+//! 范围身份：采集组 + 数据源 + 地域集合。
+//!
+//! **不含客户 / 租户**：一个数据面（网关）只服务一个客户，客户身份由发送通道
+//! （wparse 的全局 tag）在入库时打上，采集器不感知。
 //!
 //! 三条约束（设计说明 §4.2/§4.3）：
 //!
@@ -22,7 +25,6 @@ pub const GROUP_COST: &str = "cost";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Scope {
-    pub tenant_id: String,
     pub source_code: String,
     pub group: String,
     pub env_ref: String,
@@ -33,7 +35,6 @@ pub struct Scope {
 
 impl Scope {
     pub fn new(
-        tenant_id: impl Into<String>,
         source_code: impl Into<String>,
         group: impl Into<String>,
         env_ref: impl Into<String>,
@@ -43,7 +44,6 @@ impl Scope {
         regions.sort();
         regions.dedup();
         Self {
-            tenant_id: tenant_id.into(),
             source_code: source_code.into(),
             group: group.into(),
             env_ref: env_ref.into(),
@@ -62,8 +62,6 @@ impl Scope {
     /// 覆盖范围变了（比如多了一个地域）就是另一个范围，必须换 hash。
     pub fn scope_hash(&self) -> String {
         let mut canonical = String::new();
-        canonical.push_str(&self.tenant_id);
-        canonical.push('\n');
         canonical.push_str(&self.producer());
         canonical.push('\n');
         canonical.push_str(&self.env_ref);
@@ -87,13 +85,9 @@ impl Scope {
         )
     }
 
-    /// spool 下的相对目录：`<tenant>/<producer>`。
+    /// spool 下的相对目录：`<producer>`。
     pub fn spool_prefix(&self) -> String {
-        format!(
-            "{}/{}",
-            sanitize(&self.tenant_id),
-            sanitize(&self.producer())
-        )
+        sanitize(&self.producer())
     }
 }
 
@@ -117,7 +111,6 @@ mod tests {
 
     fn scope(regions: Vec<&str>) -> Scope {
         Scope::new(
-            "tenant-example",
             "tencent-cloud-prod",
             GROUP_INVENTORY,
             "prod",

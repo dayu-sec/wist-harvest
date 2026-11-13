@@ -4,7 +4,6 @@
 # 下游按它做资源匹配与作用域隔离。
 
 source_code = "tencent-cloud-prod"
-tenant_id = "tenant-example"
 vendor = "TENCENT_CLOUD"
 group = "inventory"
 env_ref = "prod"

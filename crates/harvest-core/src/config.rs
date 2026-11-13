@@ -560,7 +560,6 @@ impl ServiceConfig {
 #[serde(deny_unknown_fields)]
 pub struct SourceConfig {
     pub source_code: String,
-    pub tenant_id: String,
     /// 云厂商（选择适配器）。必填：不写就不能猜——猜错会把一个账号的数据按另一家的
     /// API 去采，错得静默且彻底。
     pub vendor: Vendor,
@@ -791,9 +790,6 @@ impl SourceConfig {
         if self.source_code.trim().is_empty() {
             return Err(ConfigError::new("source_code 不能为空"));
         }
-        if self.tenant_id.trim().is_empty() {
-            return Err(ConfigError::new("tenant_id 不能为空"));
-        }
         if self.group.trim().is_empty() {
             return Err(ConfigError::new("group 不能为空"));
         }
@@ -814,7 +810,6 @@ impl SourceConfig {
 
     pub fn scope(&self, regions: Vec<String>) -> Scope {
         Scope::new(
-            self.tenant_id.clone(),
             self.source_code.clone(),
             self.group.clone(),
             self.env_ref.clone(),
@@ -934,7 +929,6 @@ allow_plaintext = true
     fn source_config_regions_auto_or_list() {
         let auto = r#"
 source_code = "tencent-cloud-prod"
-tenant_id = "tenant-example"
 vendor = "tencent"
 regions = "auto"
 
@@ -960,7 +954,6 @@ secret_key = { env = "SEC_TENCENT_SECRET_KEY" }
     fn vendor_is_required_and_unknown_vendors_are_rejected() {
         let missing = r#"
 source_code = "s"
-tenant_id = "t"
 
 [credential]
 secret_id = { env = "A" }
@@ -970,8 +963,8 @@ secret_key = { env = "B" }
         assert!(err.message.contains("vendor"), "{}", err.message);
 
         let unknown = missing.replace(
-            "tenant_id = \"t\"",
-            "tenant_id = \"t\"\nvendor = \"oracle\"",
+            "source_code = \"s\"",
+            "source_code = \"s\"\nvendor = \"oracle\"",
         );
         assert!(SourceConfig::parse(&unknown).is_err());
     }
@@ -981,7 +974,6 @@ secret_key = { env = "B" }
         // 键名不是 core 的事情：AWS 写自己的三件套也能被解析。
         let raw = r#"
 source_code = "aws-prod"
-tenant_id = "t"
 vendor = "AWS"
 
 [credential]
@@ -1005,7 +997,6 @@ secret_access_key = { env = "SEC_AWS_SK" }
         // 旧配置里的 `billing_account_uin` 仍然有效（契约字段名在成本侧没变）。
         let raw = r#"
 source_code = "tencent-cloud-prod"
-tenant_id = "t"
 vendor = "TENCENT_CLOUD"
 billing_account_uin = "100041355715"
 
@@ -1028,7 +1019,6 @@ secret_key = { env = "B" }
 
         let raw = r#"
 source_code = "aws-prod"
-tenant_id = "t"
 vendor = "AWS"
 
 [credential]
@@ -1052,7 +1042,6 @@ partition = "aws-cn"
     fn empty_explicit_regions_is_rejected() {
         let raw = r#"
 source_code = "s"
-tenant_id = "t"
 vendor = "TENCENT_CLOUD"
 regions = []
 

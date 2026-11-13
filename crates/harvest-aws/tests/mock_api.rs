@@ -371,7 +371,6 @@ fn source_config(dir: &Path, base: &str, regions: &str, assets: &str) -> SourceC
     SourceConfig::parse(&format!(
         r#"
 source_code = "aws-prod"
-tenant_id = "tenant-example"
 vendor = "aws"
 regions = {regions}
 endpoint_override = "{base}"

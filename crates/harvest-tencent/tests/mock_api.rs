@@ -330,7 +330,6 @@ fn source_config_with_assets(dir: &Path, base: &str, regions: &str, assets: &str
     SourceConfig::parse(&format!(
         r#"
 source_code = "tencent-cloud-prod"
-tenant_id = "tenant-example"
 vendor = "TENCENT_CLOUD"
 group = "inventory"
 env_ref = "prod"

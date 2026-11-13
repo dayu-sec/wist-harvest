@@ -72,12 +72,13 @@ impl PeriodSource {
     }
 }
 
-/// 范围身份：七元组唯一确定一个范围（契约 §3）。
+/// 范围身份：六元组唯一确定一个范围（契约 §3）。
 ///
-/// 同一七元组重复发布 = **替换**，不是累加 —— 这是下游「金额不可能翻倍」的依据。
+/// 同一六元组重复发布 = **替换**，不是累加 —— 这是下游「金额不可能翻倍」的依据。
+///
+/// 不含客户：一份账单属于哪个客户由 `wist-cost` 侧用 `billing_account_uin` 映射。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CostRange {
-    pub tenant: String,
     pub source_code: String,
     pub vendor: Vendor,
     pub billing_account_uin: String,
@@ -89,9 +90,6 @@ pub struct CostRange {
 impl CostRange {
     /// 自洽校验：两种口径对 `period_start` / `period_end` 的关系不同。
     pub fn validate(&self) -> Result<(), HarvestError> {
-        if self.tenant.trim().is_empty() {
-            return Err(self.invalid("tenant 不能为空"));
-        }
         if self.source_code.trim().is_empty() {
             return Err(self.invalid("source_code 不能为空"));
         }
@@ -132,11 +130,10 @@ impl CostRange {
 
     /// 对象键前缀（与 `wist-cost` 的 `ShardKeyLayout::DESIGN_TEMPLATE` 逐字一致）。
     ///
-    /// `cost/{tenant}/{vendor}/{cost_basis}/{year}/{month}/{shard_id}.ndjson`
+    /// `cost/{vendor}/{cost_basis}/{year}/{month}/{shard_id}.ndjson`
     pub fn object_prefix(&self) -> String {
         format!(
-            "cost/{}/{}/{}/{}/{}",
-            self.tenant,
+            "cost/{}/{}/{}/{}",
             self.vendor.as_str(),
             self.cost_basis.as_str(),
             self.period_start.format("%Y"),
@@ -625,7 +622,6 @@ mod tests {
 
     fn range(basis: CostBasis, start: (i32, u32, u32), end: (i32, u32, u32)) -> CostRange {
         CostRange {
-            tenant: "DEV-X4".into(),
             source_code: "tencent-cloud-prod".into(),
             vendor: Vendor::TencentCloud,
             billing_account_uin: "100041355715".into(),
@@ -673,10 +669,7 @@ mod tests {
     #[test]
     fn object_prefix_matches_the_cost_layout() {
         let range = range(CostBasis::Charge, (2026, 10, 1), (2026, 10, 31));
-        assert_eq!(
-            range.object_prefix(),
-            "cost/DEV-X4/TENCENT_CLOUD/CHARGE/2026/10"
-        );
+        assert_eq!(range.object_prefix(), "cost/TENCENT_CLOUD/CHARGE/2026/10");
     }
 
     #[test]
@@ -800,7 +793,7 @@ mod tests {
         // 分片落的路径必须与 wist-cost 的对象键布局逐字一致，否则消费方找不到。
         let shard_path = dir
             .path()
-            .join("cost/DEV-X4/TENCENT_CLOUD/CHARGE/2026/10/0001.ndjson");
+            .join("cost/TENCENT_CLOUD/CHARGE/2026/10/0001.ndjson");
         assert!(shard_path.exists(), "分片路径 {}", shard_path.display());
         let bytes = std::fs::read(&shard_path).unwrap();
         assert_eq!(
@@ -818,7 +811,7 @@ mod tests {
 
         // 发布完成后暂存目录必须清干净（不留下一份重复的字节）。
         let staging: Vec<_> =
-            std::fs::read_dir(dir.path().join("cost/DEV-X4/TENCENT_CLOUD/CHARGE/2026/10"))
+            std::fs::read_dir(dir.path().join("cost/TENCENT_CLOUD/CHARGE/2026/10"))
                 .unwrap()
                 .flatten()
                 .filter(|entry| {
@@ -837,10 +830,10 @@ mod tests {
         let range = range(CostBasis::Charge, (2026, 10, 1), (2026, 10, 31));
         let shard_path = dir
             .path()
-            .join("cost/DEV-X4/TENCENT_CLOUD/CHARGE/2026/10/0001.ndjson");
+            .join("cost/TENCENT_CLOUD/CHARGE/2026/10/0001.ndjson");
         let manifest_path = dir
             .path()
-            .join("cost/DEV-X4/TENCENT_CLOUD/CHARGE/2026/10/manifest.json");
+            .join("cost/TENCENT_CLOUD/CHARGE/2026/10/manifest.json");
 
         // 第一批：2 行，正常发布。
         let mut first = CostShardWriter::new(
@@ -900,7 +893,7 @@ mod tests {
     fn republishing_prunes_shards_the_new_manifest_does_not_list() {
         let dir = tempfile::tempdir().unwrap();
         let range = range(CostBasis::Charge, (2026, 10, 1), (2026, 10, 31));
-        let month_dir = dir.path().join("cost/DEV-X4/TENCENT_CLOUD/CHARGE/2026/10");
+        let month_dir = dir.path().join("cost/TENCENT_CLOUD/CHARGE/2026/10");
         let writer = |batch: &str, rows: usize| {
             let mut writer = CostShardWriter::new(
                 dir.path(),

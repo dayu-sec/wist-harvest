@@ -76,7 +76,6 @@ impl Source for FakeSource {
         regions.sort();
         regions.dedup();
         Scope::new(
-            "tenant-example",
             "tencent-cloud-prod",
             "inventory",
             "prod",
@@ -174,7 +173,6 @@ allow_plaintext = true
 
 fn scope() -> Scope {
     Scope::new(
-        "tenant-example",
         "tencent-cloud-prod",
         "inventory",
         "prod",
@@ -324,7 +322,6 @@ async fn fresh_run_gets_a_new_snap_id_and_does_not_resume() {
     let dir = tempfile::tempdir().unwrap();
     let svc = service_config(&dir.path().join("spool"), &dir.path().join("state"));
     let scope = Scope::new(
-        "tenant-example",
         "tencent-cloud-prod",
         "inventory",
         "prod",
