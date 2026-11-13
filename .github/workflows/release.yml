@@ -98,7 +98,7 @@ jobs:
       # 不需要 QEMU：Dockerfile 里没有任何 `RUN`（distroless 自带运行时依赖）。
       - uses: docker/setup-buildx-action@v3
 
-      - uses: docker/login-action@v3
+      - uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -111,7 +111,7 @@ jobs:
       # `TCR_HOST` 是个 **variable**（不是 secret）：换中转地域（如香港实例）只改这一个值；
       # 未定义（或本仓不在它的作用域里）时自动回落境内实例，行为与以前一致。
       - name: Login to TCR
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ${{ vars.TCR_HOST || 'dy-sec.tencentcloudcr.com' }}
           username: ${{ secrets.TCR_USERNAME }}
@@ -171,7 +171,7 @@ jobs:
     steps:
       - uses: docker/setup-buildx-action@v3
 
-      - uses: docker/login-action@v3
+      - uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -180,7 +180,7 @@ jobs:
       - name: Login to TCR
         # 同上：TCR_USERNAME / TCR_PASSWORD 是**组织级** Secrets，TCR_HOST 是组织级 Variable，
         # 本仓直接继承，不需要在这里再建一遍。
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ${{ vars.TCR_HOST || 'dy-sec.tencentcloudcr.com' }}
           username: ${{ secrets.TCR_USERNAME }}
