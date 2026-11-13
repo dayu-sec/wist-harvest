@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+### 交付（CI 与运行镜像）
+
+- **补上发布流水线**（与 `wist-gateway` 同一套模板，只改产物名）：
+  - `.github/workflows/build-and-test.yml`：`cargo fmt --check` → `build --release` → `test --release`
+    （ubuntu-24.04 + macos-15），另起 coverage job 传 Codecov；
+  - `.github/workflows/release.yml`：推 `v*.*.*` tag 时按平台**原生**编译三个目标
+    （linux amd64/arm64、macos arm64）→ tarball；按架构各推一个单平台镜像
+    （ghcr + 腾讯云 TCR）→ 合并 manifest；发 GitHub Release；可选推 COS
+    （带 `x-cos-meta-artifact-sha256`）；
+  - `.github/dependabot.yml`（cargo + github-actions）。
+- **新增 `docker/Dockerfile`**：`distroless/cc-debian13` + 预编译二进制，**整个文件没有一个 `RUN`**
+  （否则 arm64 那侧要在 QEMU 下跑 apt-get）。与 gateway 的差别只有三处，都是为了「采集器」：
+  运行身份 **10001:10001**（与 `wist-field-stack` 的 compose 同值）、
+  **不 EXPOSE**（没有入站面）、**不内置 HEALTHCHECK**（`diagnose` 必须带栈给的 `--config`/`--source`）。
+- 与 gateway 的有意偏离：没有跨仓检出（用例全用仓内 fixture，拉别仓只会被别仓的分支染红）；
+  Codecov 上传失败不阻断构建（新仓配 `CODECOV_TOKEN` 之前不该因“覆盖率没传上去”变红）。
+
 ### 多云（P0 解耦 + P1 第二家云）
 
 - **`vendor` 成为必填配置**：`sources.d` 里显式写 `vendor = "TENCENT_CLOUD" | "AWS"`；

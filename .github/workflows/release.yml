@@ -1,0 +1,308 @@
+name: Release
+
+# 与 `wist-gateway` 的 `release.yml` 同一套流水线（只改产物名）：
+#   ① 按平台原生编译 → tarball；
+#   ② 用 Linux 二进制按架构各推一个单平台镜像（ghcr + 腾讯云 TCR）；
+#   ③ 合并成 manifest list（最终 tag / :latest 在这里产生）；
+#   ④ 发 GitHub Release；⑤ 可选推 COS。
+on:
+  push:
+    tags: ["v*.*.*"]
+
+permissions:
+  contents: read
+
+jobs:
+  # 1. 按平台原生编译二进制，产出 tarball（直接下载 + 供 Docker 镜像用）
+  #
+  # 为什么要 macOS 那一份：harvest 经常要在开发机上对着真实云账号跑一次
+  # `once` / `diagnose`（容器里没有凭据与网络），tarball 是那条路的入口。
+  build-binaries:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+          - os: macos-15
+            target: aarch64-apple-darwin
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          targets: ${{ matrix.target }}
+
+      - name: Cargo build
+        run: cargo build --release --locked --target ${{ matrix.target }} -p harvest-app
+
+      - name: Package tarball
+        run: |
+          mkdir -p artifacts
+          cp "target/${{ matrix.target }}/release/wist-harvest" artifacts/wist-harvest
+          tar -czf "wist-harvest-${{ github.ref_name }}-${{ matrix.target }}.tar.gz" -C artifacts wist-harvest
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: wist-harvest-${{ matrix.target }}
+          path: wist-harvest-${{ github.ref_name }}-${{ matrix.target }}.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+
+  # 2. 用 Linux 二进制打包并推送**单平台**镜像（每架构一个 job，并行）
+  #
+  # 为什么不 `--platform linux/amd64,linux/arm64` 一次构建：
+  #   · 单次多平台构建是**串行**的，两个架构一个接一个；
+  #   · build context 里要同时放两份二进制，一次传给 builder；
+  #   · 一个架构失败会拖死整条链；拆开 + `fail-fast: false` 时另一份照常产出。
+  # manifest list 由下面的 `manifest` job 合并。
+  docker:
+    needs: [build-binaries]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            platform: linux/amd64
+            target: x86_64-unknown-linux-gnu
+          - arch: arm64
+            platform: linux/arm64
+            target: aarch64-unknown-linux-gnu
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: wist-harvest-${{ matrix.target }}
+          path: staged
+
+      - name: Stage binary for docker build
+        run: |
+          mkdir -p "docker/${{ matrix.arch }}"
+          tar -xzf "staged/wist-harvest-${{ github.ref_name }}-${{ matrix.target }}.tar.gz" -C "docker/${{ matrix.arch }}"
+          ls -R "docker/${{ matrix.arch }}"
+
+      # 不需要 QEMU：Dockerfile 里没有任何 `RUN`（distroless 自带运行时依赖）。
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # 国内镜像源（腾讯云 TCR）：国内服务器拉 ghcr.io 很慢，客户端改用 TCR 地址。
+      # 凭据在 TCR 控制台生成（访问凭证），存 GitHub Secrets：TCR_USERNAME / TCR_PASSWORD。
+      # `TCR_HOST` 是个 **variable**（不是 secret）：换中转地域（如香港实例）只改这一个值，
+      # 不配时回落到现有境内实例，行为与以前一致。
+      - name: Login to TCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ vars.TCR_HOST || 'dy-sec.tencentcloudcr.com' }}
+          username: ${{ secrets.TCR_USERNAME }}
+          password: ${{ secrets.TCR_PASSWORD }}
+
+      # 单平台 tag 带架构后缀（`:v0.1.0-alpha-amd64`）；最终 tag 由 manifest job 合并出来。
+      - name: Compute image tags
+        id: meta
+        run: |
+          tcr_host="${{ vars.TCR_HOST || 'dy-sec.tencentcloudcr.com' }}"
+          printf 'tags<<__EOF__\n%s\n%s\n__EOF__\n' \
+            "ghcr.io/${{ github.repository }}:${{ github.ref_name }}-${{ matrix.arch }}" \
+            "${tcr_host}/cloud/wist-harvest:${{ github.ref_name }}-${{ matrix.arch }}" \
+            >> "$GITHUB_OUTPUT"
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: docker
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          platforms: ${{ matrix.platform }}
+          # 关掉 provenance：合并 manifest 时它只会多出 `unknown/unknown` 条目。
+          provenance: false
+          # `mode=min`（默认）：单镜像就三层，`max` 会把基础镜像层也导出到 gha cache，
+          # 官方文档里那种 `preparing build cache for export … maximum timeout reached`
+          # 就是这么撞出来的。按架构分 scope，避免两个 job 互相覆盖。
+          cache-from: type=gha,scope=wist-harvest-${{ matrix.arch }}
+          cache-to: type=gha,mode=min,scope=wist-harvest-${{ matrix.arch }}
+
+  # 3. 把两个单平台镜像合并成 manifest list（最终 tag / latest 在这里产生）
+  manifest:
+    name: Merge manifest list
+    needs: [docker]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Login to TCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ vars.TCR_HOST || 'dy-sec.tencentcloudcr.com' }}
+          username: ${{ secrets.TCR_USERNAME }}
+          password: ${{ secrets.TCR_PASSWORD }}
+
+      - name: Create manifest lists
+        run: |
+          set -euo pipefail
+          ref="${{ github.ref_name }}"
+          tcr_host="${{ vars.TCR_HOST || 'dy-sec.tencentcloudcr.com' }}"
+
+          merge() {
+            local repo="$1"
+            docker buildx imagetools create -t "${repo}:${ref}" \
+              "${repo}:${ref}-amd64" "${repo}:${ref}-arm64"
+            # 预发布 tag（`-alpha` / `-beta` / `-rc`）**不覆盖 :latest**：
+            # 否则 :latest 会指向预发布产物。注意 on.push.tags 的 `v*.*.*`
+            # 也会匹配 `v0.1.3-alpha`，不能指望触发条件区分。
+            case "${ref}" in
+              *-*) ;;
+              *)
+                docker buildx imagetools create -t "${repo}:latest" \
+                  "${repo}:${ref}-amd64" "${repo}:${ref}-arm64"
+                ;;
+            esac
+          }
+
+          merge "ghcr.io/${{ github.repository }}"
+          merge "${tcr_host}/cloud/wist-harvest"
+
+  # 4. 发布 tarball 到 GitHub Release
+  release:
+    needs: [build-binaries]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: wist-harvest-*
+          path: artifacts
+          merge-multiple: true
+
+      - name: Release
+        uses: softprops/action-gh-release@v3
+        with:
+          name: ${{ github.ref_name }}
+          tag_name: ${{ github.ref_name }}
+          generate_release_notes: true
+          files: artifacts/*.tar.gz
+
+  # 可选：把本仓制品推到腾讯云 COS，供中心 / CDN / 客户端按稳定 URL 拉取。
+  # 未配置 Variables（COS_BUCKET 为空）时整段自动跳过，不会让发布失败；
+  # 一旦设置 COS_BUCKET 即视为启用，此时密钥缺失会直接报错（便于发现漏配）。
+  # 注意：`secrets` 上下文不能出现在 step 级 if 里，故启用判定放在 job 级（只看 vars）。
+  #   Variables：COS_BUCKET（含 -APPID）、COS_REGION（如 ap-guangzhou）、可选 COS_PREFIX（默认取仓库名）
+  #   Secrets：  COS_SECRET_ID、COS_SECRET_KEY（临时密钥再加 COS_SESSION_TOKEN）
+  # 对象键：<COS_PREFIX>/<tag>/<文件名> 与 <COS_PREFIX>/latest/<文件名>
+  # 每个对象带自定义元数据 x-cos-meta-artifact-sha256=<hex>（COS 只存 MD5 ETag，sha256 得自带）。
+  upload-cos:
+    name: Upload artifacts to Tencent COS
+    needs: [release]
+    runs-on: ubuntu-24.04
+    if: ${{ vars.COS_BUCKET != '' }}
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: pkg
+          merge-multiple: true
+
+      - name: Install coscli
+        run: |
+          set -eu
+          mkdir -p "$HOME/.local/bin"
+          curl -fsSL -o "$HOME/.local/bin/coscli" \
+            https://github.com/tencentyun/coscli/releases/download/v1.0.9/coscli-v1.0.9-linux-amd64
+          chmod +x "$HOME/.local/bin/coscli"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/coscli" --version
+
+      - name: Upload to COS
+        env:
+          COS_BUCKET: ${{ vars.COS_BUCKET }}
+          COS_REGION: ${{ vars.COS_REGION }}
+          COS_PREFIX: ${{ vars.COS_PREFIX }}
+          COS_SECRET_ID: ${{ secrets.COS_SECRET_ID }}
+          COS_SECRET_KEY: ${{ secrets.COS_SECRET_KEY }}
+          COS_SESSION_TOKEN: ${{ secrets.COS_SESSION_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -eu
+          # 去掉密钥里的空白字符：粘贴常带入尾随换行/空格，会让签名报 SecretKey is invalid。
+          secret_id="$(printf '%s' "${COS_SECRET_ID}" | tr -d '[:space:]')"
+          secret_key="$(printf '%s' "${COS_SECRET_KEY}" | tr -d '[:space:]')"
+          session_token="$(printf '%s' "${COS_SESSION_TOKEN}" | tr -d '[:space:]')"
+          # 明文写入 AK/SK，因此必须显式关掉 coscli 的密钥加密（disableencryption）。
+          cat > "$HOME/.cos.yaml" <<EOF
+          cos:
+            base:
+              protocol: https
+              disableencryption: "true"
+              secretid: "${secret_id}"
+              secretkey: "${secret_key}"
+              sessiontoken: "${session_token}"
+            buckets:
+              - name: "${COS_BUCKET}"
+                alias: "${COS_BUCKET}"
+                region: "${COS_REGION}"
+                endpoint: "cos.${COS_REGION}.myqcloud.com"
+          EOF
+          prefix="${COS_PREFIX:-${GITHUB_REPOSITORY##*/}}"
+          prefix="${prefix%/}"
+          cfg="$HOME/.cos.yaml"
+          out="$PWD/coscli_output"
+          rm -rf "${out}"
+          # coscli 只打印汇总，失败明细落在 coscli_output/<时间>/ 下；失败时打印并输出为 annotation。
+          dump_err() {
+            echo "::error::$1"
+            if [ -d "${out}" ]; then
+              find "${out}" -type f -exec sh -c 'echo "--- $1"; cat "$1"' _ {} \;
+              detail="$(find "${out}" -type f -exec cat {} \; | tr '\n' ' ' | sed -e 's/%/%25/g' | cut -c1-1500)"
+              echo "::error title=coscli 明细::$1 —— ${detail}"
+            fi
+            exit 1
+          }
+          shopt -s nullglob
+          files=(pkg/*)
+          [ ${#files[@]} -gt 0 ] || { echo "::error::pkg/ 下没有制品可上传"; exit 1; }
+          for f in "${files[@]}"; do
+            [ -f "${f}" ] || continue
+            name="$(basename "${f}")"
+            # COS 对象只存 MD5（ETag），GitHub 侧资产 digest（sha256）过不来。把 sha256 作为
+            # **对象自定义元数据**写进对象本身（x-cos-meta-artifact-sha256 —— 与设计里的
+            # artifact_sha256 字段同名）—— 随对象走，录 COS 地址时可用 `coscli stat`（HEAD）
+            # 读回填 expected_sha256（`ls` 不返回自定义元数据）。--meta 形如 key:value（多个用 # 分隔）。
+            # 本 step 只有 `set -eu`（无 pipefail），管道失败会被 cut 吃掉；空摘要等于又「丢」了，
+            # 故显式兜一道。
+            sha="$(sha256sum "${f}" | cut -d' ' -f1)"
+            [ -n "${sha}" ] || { echo "::error::无法计算 ${name} 的 sha256" >&2; exit 1; }
+            meta="x-cos-meta-artifact-sha256:${sha}"
+            coscli cp "${f}" "cos://${COS_BUCKET}/${prefix}/${TAG}/${name}" -c "${cfg}" --meta "${meta}" \
+              || dump_err "上传 ${name} 失败（${TAG}）"
+            coscli cp "${f}" "cos://${COS_BUCKET}/${prefix}/latest/${name}" -c "${cfg}" --meta "${meta}" \
+              || dump_err "上传 ${name} 失败（latest）"
+            echo "已上传 ${name}  sha256=${sha}"
+          done
+          echo "COS 上传完成。"
+          coscli ls "cos://${COS_BUCKET}/${prefix}/" -c "${cfg}" \
+            || echo "::warning::COS 列表失败（可能缺 cos:GetBucket 权限）；上传本身已成功。"

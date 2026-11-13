@@ -1,0 +1,86 @@
+name: Build & Test
+
+# 与 `wist-gateway` 的 `build-and-test.yml` 同一套（同一组门禁、同一台矩阵）：
+#   fmt → build(release) → test(release) ｜ 另起一个 coverage job 传 Codecov。
+#
+# 与 gateway 的**唯一差别**：没有跨仓检出（wist-knowledge / wist-design）。
+# gateway 的用例会读那两个仓的「真实数据」，harvest 的用例全部用仓内 fixture
+# （腾讯云响应、SigV4 固定向量、EC2 XML），拉别的仓只会让构建被别的仓的分支染红。
+#
+# 也**没有** clippy：gateway 的 CI 里没有，这里保持一致（本地走 `gx run lint`）。
+on:
+  push:
+    branches:
+      - "*"
+  pull_request:
+    types: [opened, reopened]
+    branches:
+      - "*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15]
+    steps:
+      - name: Checkout wist-harvest
+        uses: actions/checkout@v7
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+
+      - name: Cargo fmt
+        run: cargo fmt --check
+
+      - name: Cargo build (release)
+        run: cargo build --release --all
+
+      - name: Cargo test (release)
+        run: cargo test --release --all
+
+  coverage:
+    name: Code Coverage
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout wist-harvest
+        uses: actions/checkout@v7
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          components: llvm-tools-preview
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+
+      - name: Generate coverage report
+        run: |
+          cargo llvm-cov --all-features --workspace --lcov --output-path lcov.info -- --test-threads=1
+          echo "Coverage file generated:"
+          ls -la lcov.info
+          echo "File size: $(wc -c < lcov.info) bytes"
+
+      - name: Upload to Codecov
+        uses: codecov/codecov-action@v7
+        with:
+          files: lcov.info
+          flags: unittests
+          name: coverage-${{ github.ref_name }}
+          token: ${{ secrets.CODECOV_TOKEN }}
+          # 与 gateway 的差别：gateway 在 push 时把上传失败当构建失败，那是因为它那边
+          # CODECOV_TOKEN 早已配好。新仓在 token 配上之前，一处「上传 401」不该把整条
+          # 构建染红（覆盖率没传上去 ≠ 代码错了）。配上 token 后可以把这里改回
+          # `${{ github.event_name == 'push' }}`。
+          fail_ci_if_error: false
+          verbose: true

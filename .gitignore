@@ -4,3 +4,7 @@ _gal/.report/
 _gal/.run*
 .spool/
 .state/
+
+# release 流水线给镜像准备二进制的地方（build context 按架构分目录）
+/docker/amd64/
+/docker/arm64/

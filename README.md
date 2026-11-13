@@ -98,6 +98,8 @@ wist-harvest/
 ├── version.txt                 # 版本唯一来源
 ├── Cargo.toml                  # workspace（版本 marker 在 [workspace.package]）
 ├── docs/examples/              # harvest.toml + 腾讯云/AWS 的 sources.d 样例
+├── docker/                     # 运行镜像（build context 按架构提供预编译二进制）
+├── .github/workflows/          # CI：build-and-test.yml + release.yml
 └── crates/
     ├── harvest-core/           # 与厂商无关：config/scope/page/spool/manifest/完整性/
     │                           #   租约/限速/脱敏/状态机/调度/编排
@@ -124,6 +126,27 @@ cargo test
 
 > 注意：`gx run lint` 里的 `cargo fix` 需要版本库；仓库已入库，可直接使用。
 > 等价的三行门禁如下。
+
+### CI 与镜像
+
+与 `wist-gateway` **同一套流水线**（模板随仓走，只改产物名）：
+
+| 工作流 | 触发 | 干什么 |
+| --- | --- | --- |
+| `build-and-test.yml` | 任意分支 push / PR | `cargo fmt --check` → `build --release` → `test --release`（ubuntu-24.04 + macos-15）；另起 coverage job 传 Codecov |
+| `release.yml` | 推 `v*.*.*` tag | 三个平台原生编译 → tarball；按架构推单平台镜像（ghcr + 腾讯云 TCR）→ 合并 manifest；发 GitHub Release；可选推 COS |
+
+镜像只有**一个包**：`ghcr.io/dayu-sec/wist-harvest`（国内站点用
+`dy-sec.tencentcloudcr.com/cloud/wist-harvest`），tag 跟着仓库 tag 走。
+
+镜像本身是 `distroless/cc-debian13`，**不含 shell**，原因与 gateway 同（见 `docker/Dockerfile` 头部）：
+二进制是 glibc 动态链接、需要 `libgcc_s` 与系统根证书，而 Dockerfile 里一个 `RUN` 都不许有
+（否则 arm64 那侧要在 QEMU 下跑 `apt-get`）。所以：
+
+- **用户名 10001:10001**：计算区那一栈（`wist-field-stack`）的 compose 就是这么写的；
+- **不 EXPOSE**：没有入站面；
+- **不内置 HEALTHCHECK**：`diagnose` 必须带 `--config` / `--source`，路径由栈挂载决定，
+  健康检查写在栈的 compose 里。
 
 ## 用法
 
