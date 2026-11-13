@@ -1,13 +1,12 @@
 name: Build & Test
 
-# 与 `wist-gateway` 的 `build-and-test.yml` 同一套（同一组门禁、同一台矩阵）：
-#   fmt → build(release) → test(release) ｜ 另起一个 coverage job 传 Codecov。
-#
-# 与 gateway 的**唯一差别**：没有跨仓检出（wist-knowledge / wist-design）。
-# gateway 的用例会读那两个仓的「真实数据」，harvest 的用例全部用仓内 fixture
-# （腾讯云响应、SigV4 固定向量、EC2 XML），拉别的仓只会让构建被别的仓的分支染红。
-#
-# 也**没有** clippy：gateway 的 CI 里没有，这里保持一致（本地走 `gx run lint`）。
+# 与 `wist-gateway` 的 `build-and-test.yml` 同一套骨架，三处有意的差别：
+#   · **没有跨仓检出**（wist-knowledge / wist-design）：gateway 的用例会读那两个仓的
+#     「真实数据」，harvest 的用例全部用仓内 fixture（腾讯云响应、SigV4 固定向量、EC2 XML），
+#     拉别仓只会让构建被别仓的分支染红；
+#   · **多了 clippy（-D warnings）**：它是本仓 README 里声明的门禁，gateway 的 CI 没跑，
+#     结果是「CI 绿、本地门禁红」。只跑 ubuntu（clippy 的 lint 集合跟工具链版本走）；
+#   · **`--locked`**：与 release 的编译命令一致，锁文件漂移在 CI 就红。
 on:
   push:
     branches:
@@ -36,15 +35,25 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: stable
+          components: clippy
 
       - name: Cargo fmt
-        run: cargo fmt --check
+        run: cargo fmt --all --check
 
+      # 与仓库自己声明的门禁一致（README「构建与门禁」里的第二行）。
+      # gateway 的 CI 里没有这一步，代价是「CI 绿 ≠ 本地门禁绿」—— 这里补上。
+      # 只跑 ubuntu：clippy 的 lint 集合跟工具链版本走，两个 OS 都跑只是双倍噪声。
+      - name: Cargo clippy
+        if: matrix.os == 'ubuntu-24.04'
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      # `--locked` 与 release 的编译命令保持一致：锁文件与 Cargo.toml 漂移时，
+      # 应该在 CI 就红，而不是等到推 tag 才发现 release 阶段编不过。
       - name: Cargo build (release)
-        run: cargo build --release --all
+        run: cargo build --release --locked --all
 
       - name: Cargo test (release)
-        run: cargo test --release --all
+        run: cargo test --release --locked --all
 
   coverage:
     name: Code Coverage

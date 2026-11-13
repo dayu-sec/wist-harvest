@@ -8,20 +8,28 @@
 
 ### 交付（CI 与运行镜像）
 
-- **补上发布流水线**（与 `wist-gateway` 同一套模板，只改产物名）：
-  - `.github/workflows/build-and-test.yml`：`cargo fmt --check` → `build --release` → `test --release`
-    （ubuntu-24.04 + macos-15），另起 coverage job 传 Codecov；
-  - `.github/workflows/release.yml`：推 `v*.*.*` tag 时按平台**原生**编译三个目标
-    （linux amd64/arm64、macos arm64）→ tarball；按架构各推一个单平台镜像
-    （ghcr + 腾讯云 TCR）→ 合并 manifest；发 GitHub Release；可选推 COS
-    （带 `x-cos-meta-artifact-sha256`）；
+- **补上发布流水线**（骨架取自 `wist-gateway`，只改产物名；三处有意偏离见下）：
+  - `.github/workflows/build-and-test.yml`：`cargo fmt --all --check` → `clippy -D warnings`
+    → `build --release --locked` → `test --release --locked`（ubuntu-24.04 + macos-15），
+    另起 coverage job 传 Codecov；
+  - `.github/workflows/release.yml`：推 `v*.*.*` tag 时按平台**原生**编译两个 linux 目标
+    （amd64/arm64）→ tarball；按架构各推一个单平台镜像（ghcr + 腾讯云 TCR）→
+    **先冒烟跑一次镜像**（`--version` + 缺配置时 `diagnose` 必须非 0）→ 合并 manifest；
+    发 GitHub Release；可选推 COS（带 `x-cos-meta-artifact-sha256`）；
   - `.github/dependabot.yml`（cargo + github-actions）。
+- **不出 macOS 产物**：本仓发出去的形态是镜像，macOS 那份只服务「开发机跑一次」，
+  `cargo run` 已足够，不值 `macos-15` 的 10 倍分钟数。
 - **新增 `docker/Dockerfile`**：`distroless/cc-debian13` + 预编译二进制，**整个文件没有一个 `RUN`**
   （否则 arm64 那侧要在 QEMU 下跑 apt-get）。与 gateway 的差别只有三处，都是为了「采集器」：
   运行身份 **10001:10001**（与 `wist-field-stack` 的 compose 同值）、
   **不 EXPOSE**（没有入站面）、**不内置 HEALTHCHECK**（`diagnose` 必须带栈给的 `--config`/`--source`）。
-- 与 gateway 的有意偏离：没有跨仓检出（用例全用仓内 fixture，拉别仓只会被别仓的分支染红）；
-  Codecov 上传失败不阻断构建（新仓配 `CODECOV_TOKEN` 之前不该因“覆盖率没传上去”变红）。
+- 与 gateway 的三处有意偏离：
+  · 没有跨仓检出（用例全用仓内 fixture，拉别仓只会被别仓的分支染红）；
+  · 多了 `clippy -D warnings`（本仓 README 自己声明的门禁，gateway 的 CI 没跑，
+    结果是「CI 绿、本地门禁红」）；只跑 ubuntu，避免 lint 集合跟着工具链版本双倍噪声；
+  · `--locked` 与 release 的编译命令一致（锁文件漂移在 CI 就红，而不是推 tag 才发现）。
+- Codecov 上传失败不阻断构建（组织级 `CODECOV_TOKEN` 尚未作用到本仓时，
+  上传 401 不该把整条构建染红）；确认可传后改回 push 时阻断。
 
 ### 多云（P0 解耦 + P1 第二家云）
 

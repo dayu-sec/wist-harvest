@@ -133,8 +133,12 @@ cargo test
 
 | 工作流 | 触发 | 干什么 |
 | --- | --- | --- |
-| `build-and-test.yml` | 任意分支 push / PR | `cargo fmt --check` → `build --release` → `test --release`（ubuntu-24.04 + macos-15）；另起 coverage job 传 Codecov |
-| `release.yml` | 推 `v*.*.*` tag | 三个平台原生编译 → tarball；按架构推单平台镜像（ghcr + 腾讯云 TCR）→ 合并 manifest；发 GitHub Release；可选推 COS |
+| `build-and-test.yml` | 任意分支 push / PR | `cargo fmt --all --check` → `clippy -D warnings`（ubuntu）→ `build --release --locked` → `test --release --locked`（ubuntu-24.04 + macos-15）；另起 coverage job 传 Codecov |
+| `release.yml` | 推 `v*.*.*` tag | 两个 linux 平台原生编译 → tarball；按架构推单平台镜像（ghcr + 腾讯云 TCR）→ **冒烟跑一次** → 合并 manifest；发 GitHub Release；可选推 COS |
+
+只有 **linux amd64/arm64** 的产物：本仓是容器里跑的采集器，发出去的形态就是镜像；
+macOS 那一份唯一的用处是「开发机上对着真实云账号跑一次」，而 `cargo run` 一行就够了
+—— 不值得为它付 `macos-15` 的 10 倍分钟数。
 
 镜像只有**一个包**：`ghcr.io/dayu-sec/wist-harvest`（国内站点用
 `dy-sec.tencentcloudcr.com/cloud/wist-harvest`），tag 跟着仓库 tag 走。

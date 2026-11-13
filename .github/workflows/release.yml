@@ -15,8 +15,9 @@ permissions:
 jobs:
   # 1. 按平台原生编译二进制，产出 tarball（直接下载 + 供 Docker 镜像用）
   #
-  # 为什么要 macOS 那一份：harvest 经常要在开发机上对着真实云账号跑一次
-  # `once` / `diagnose`（容器里没有凭据与网络），tarball 是那条路的入口。
+  # **只出 linux**：本仓是容器里跑的采集器，发布的产物就是镜像；
+  # macOS 产物唯一的用处是「开发机上拿真实云账号跑一次 `once`/`diagnose`」，
+  # 而那件事用 `cargo run` 一行就做了 —— 不值得为它付 `macos-15` 的 10 倍分钟数。
   build-binaries:
     name: Build ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
@@ -28,8 +29,6 @@ jobs:
             target: x86_64-unknown-linux-gnu
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
-          - os: macos-15
-            target: aarch64-apple-darwin
     steps:
       - uses: actions/checkout@v7
 
@@ -37,6 +36,11 @@ jobs:
         with:
           toolchain: stable
           targets: ${{ matrix.target }}
+
+      # 每个 tag 从零编译两个目标太浪费：缓存 key 跟着 target 走（两个矩阵项不互相覆盖）。
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}
 
       - name: Cargo build
         run: cargo build --release --locked --target ${{ matrix.target }} -p harvest-app
@@ -137,6 +141,24 @@ jobs:
           # 就是这么撞出来的。按架构分 scope，避免两个 job 互相覆盖。
           cache-from: type=gha,scope=wist-harvest-${{ matrix.arch }}
           cache-to: type=gha,mode=min,scope=wist-harvest-${{ matrix.arch }}
+
+      # **镜像必须能起来一次**：distroless + glibc 的经典翻车是「构建成功、容器起不来」
+      # （缺 `libgcc_s.so.1` / glibc 版本不够，退出码 127）。这一类错误在构建阶段看不见，
+      # 只能靠真跑一次拦住 —— 拦在 tag 之后、现场之前。
+      # 只跑 amd64：arm64 要 QEMU 才能执行，那点收益不值这份复杂度。
+      - name: Smoke test image
+        if: matrix.arch == 'amd64'
+        run: |
+          set -euo pipefail
+          image="ghcr.io/${{ github.repository }}:${{ github.ref_name }}-${{ matrix.arch }}"
+          docker run --rm "${image}" --version
+          # 再验一次「没有配置时 diagnose 会明确失败」—— 后者是容器 healthcheck 的语义，
+          # 不能是 0（否则「配置坏了」会被当成健康）。
+          if docker run --rm "${image}" diagnose --config /nonexistent --source /nonexistent; then
+            echo "::error::diagnose 在配置缺失时返回 0（healthcheck 会永远绿）"
+            exit 1
+          fi
+          echo "ok: 镜像可执行，且缺配置时 diagnose 非 0"
 
   # 3. 把两个单平台镜像合并成 manifest list（最终 tag / latest 在这里产生）
   manifest:
