@@ -1,6 +1,10 @@
 # Changelog
 
-## Unreleased
+## 0.1.0-alpha — 2026-11-13
+
+首个**实际发布**的版本（`v0.1.0-alpha`）。骨架写完时只打了 CHANGELOG 标题、没打 tag，
+所以下面这些内容一次进这一个版本：多云（腾讯云 + AWS）、成本链路、
+正确性修复，以及 CI/运行镜像。
 
 ### 交付（CI 与运行镜像）
 
@@ -73,6 +77,8 @@
   `Interval` 语义、WPL 的 `chars:body`（无 NUL）。
 - 修掉 clippy `-D warnings` 的测试代码告警，门禁恢复绿色。
 
+### 运行（`run` / `diagnose`）
+
 - 新增 `run` 常驻调子命令：`--run-at`（默认 00:30 Asia/Shanghai）或 `--interval`，
   叠加 `--jitter`（默认 5 分钟）错开多站点；单轮并发（上一轮未结束则跳过并 warn）；
   失败按指数退避重试且**不推迟下一次定点**；SIGTERM/SIGINT 优雅退出（退出码 0）。
@@ -81,7 +87,7 @@
 - `harvest-app` 拆出 lib，四个子命令的逻辑都可在集成测试里直接断言。
 - 抓取轮次支持取消（`RunOptions.cancel`）：信号到达时在工作项边界中止，保持零帧。
 
-## 0.1.0 — 2026-11-12
+### 骨架（P0，首版里一并带上）
 
 P0 骨架：`inventory` 采集组端到端跑通。
 
