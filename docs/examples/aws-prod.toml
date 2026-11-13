@@ -1,0 +1,40 @@
+# 数据源定义：/etc/wist-harvest/sources.d/<source_code>.toml
+#
+# 这是一个 **AWS** 账号的样例。与腾讯云的差别只有三处：
+#   - `vendor = "AWS"`（选择适配器）
+#   - `[credential]` 的键名是 AWS 的三件套（`session_token` 可选）
+#   - `[vendor_options].partition` 决定域名后缀（`aws` / `aws-cn` / `aws-us-gov`）
+#
+# 同样的采集组、同样的规范字段、同样的快照帧；区别全在 `harvest-aws` 里。
+
+source_code = "aws-prod"
+tenant_id = "tenant-example"
+vendor = "AWS"
+group = "inventory"
+env_ref = "prod"
+
+# 地域范围：
+#   "auto"  → 运行时用 ec2:DescribeRegions 解析（排除 not-opted-in）
+#   列 表   → 固定范围，可用 region_names 补充显示名
+regions = "auto"
+# regions = ["us-east-1", "ap-east-1"]
+# [region_names]
+# us-east-1 = "美国东部(弗吉尼亚北部)"
+
+[assets]
+cloud_host = true
+eip = true
+vpc = true
+subnet = true
+
+[credential]
+access_key_id = { env = "SEC_AWS_ACCESS_KEY_ID" }
+secret_access_key = { env = "SEC_AWS_SECRET_ACCESS_KEY" }
+# 临时凭据（STS）才需要；配了就会参与签名。
+# session_token = { env = "SEC_AWS_SESSION_TOKEN" }
+
+[vendor_options]
+partition = "aws"
+
+# 仅测试/联调用：把所有 AWS 接口的 host 指向同一个 base URL。
+# endpoint_override = "http://127.0.0.1:18080"

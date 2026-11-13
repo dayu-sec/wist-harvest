@@ -12,7 +12,7 @@
 //! （`DecimalSum`），不碰浮点。
 
 use harvest_core::cost::{
-    COST_DETAIL_SCHEMA, CostBasis, CostDetail, CostRange, DecimalSum, resource_key,
+    COST_DETAIL_SCHEMA, CostBasis, CostDetail, CostFetchStat, CostRange, DecimalSum, resource_key,
 };
 use harvest_core::error::{ErrorClass, HarvestError};
 use serde_json::{Map, Value, json};
@@ -32,16 +32,6 @@ pub const PAGE_LIMIT: u64 = 300;
 pub const SET_KEY: &str = "DetailSet";
 pub const TOTAL_KEY: &str = "Total";
 
-/// 一个范围抓下来多少行 / 多少页 / 多少重试。
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
-pub struct BillFetchStat {
-    pub rows: u64,
-    pub pages: u64,
-    pub retries: u64,
-    /// 云 API `RequestId`（写入 manifest 供排障，不含凭据）。
-    pub request_ids: Vec<String>,
-}
-
 /// 抓一个范围的所有明细，逐行回调（有界内存）。
 ///
 /// `on_row` 必须自己决定要不要（比如按 `BillDay` 过滤日范围）；这里只负责
@@ -50,12 +40,12 @@ pub async fn fetch_range<F>(
     client: &TencentClient,
     range: &CostRange,
     mut on_row: F,
-) -> Result<BillFetchStat, HarvestError>
+) -> Result<CostFetchStat, HarvestError>
 where
     F: FnMut(&Map<String, Value>) -> Result<(), HarvestError>,
 {
     let month = range.month_label();
-    let mut stat = BillFetchStat::default();
+    let mut stat = CostFetchStat::default();
     let mut offset: u64 = 0;
     let mut total: Option<u64> = None;
 

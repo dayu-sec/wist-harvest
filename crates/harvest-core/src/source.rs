@@ -42,12 +42,32 @@ impl WorkItem {
     }
 }
 
+/// 一页分页的完整性证据。
+///
+/// 不同云的“采全了”证据不一样：
+/// - 有总数的（腾讯云 `TotalCount`、阿里云 `TotalCount`）：实收行数 == 总数；
+/// - 无总数的（AWS/Azure 的游标分页）：**游标走到尽头**就是证据。
+///
+/// 这条必须显式建模，不能用「`expected_rows` 为 None 就不校验」了事：
+/// 那等于把「没采全」当成「没问题」。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Completeness {
+    /// 云端给了总数，且实收行数与之一致。
+    Total { total: u64 },
+    /// 云端不提供总数；分页游标已经耗尽。
+    Exhausted,
+}
+
 /// 单个工作项的抓取统计。是完整性证据，也进运行报告。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct FetchStat {
     pub rows: u64,
     pub pages: u64,
-    /// 云端声明的总数（`TotalCount`）。用于事后核对分页是否连续。
+    /// 完整性证据（新代码必填；旧 manifest 没有这个字段时回落 `expected_rows`）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completeness: Option<Completeness>,
+    /// 云端声明的总数（`TotalCount`）。历史上是唯一证据，保留给旧 manifest 与报告。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expected_rows: Option<u64>,
     #[serde(default)]
@@ -61,6 +81,12 @@ pub struct FetchStat {
 #[async_trait]
 pub trait Source: Send + Sync {
     fn vendor(&self) -> Vendor;
+
+    /// 已解析的范围（地域集合在 `init` 里确定）。
+    ///
+    /// 运行器靠它拿 `snap_id` / 租约 / spool 前缀，所以它必须来自同一份解析结果，
+    /// 不能在调用方另算一遍。
+    fn scope(&self) -> crate::scope::Scope;
 
     /// 类型 × 地域 × 分页计划。必须在拿租约之后、抓取之前确定。
     fn plan(&self) -> Vec<WorkItem>;
@@ -100,4 +126,17 @@ pub struct PublishAck {
 #[async_trait]
 pub trait Sink: Send + Sync {
     async fn publish_snapshot(&self, snap: &CompleteSnapshot) -> Result<PublishAck, HarvestError>;
+}
+
+/// 成本链路的厂商入口（与资产 `Source` 并列，但输出形态不同）。
+///
+/// 成本不进数据平面：厂商只负责「拉一页账单 → 交给回调」。分片、manifest、
+/// 金额累加都在 `harvest-core::cost`，所以这里只返回统计。
+#[async_trait]
+pub trait CostSource: Send + Sync {
+    async fn fetch_cost(
+        &self,
+        range: &crate::cost::CostRange,
+        on_row: &mut (dyn FnMut(crate::cost::CostDetail) -> Result<(), HarvestError> + Send),
+    ) -> Result<crate::cost::CostFetchStat, HarvestError>;
 }

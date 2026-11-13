@@ -466,6 +466,7 @@ fn build_report(
                 rows: record.rows,
                 pages: record.pages,
                 expected_rows: record.expected_rows,
+                completeness: record.completeness.clone(),
                 retries: record.retries,
                 duration_ms: record.duration_ms,
                 request_ids: record.request_ids.clone(),

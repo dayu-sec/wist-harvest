@@ -22,7 +22,7 @@ use harvest_core::redact;
 use harvest_core::scope::Scope;
 use harvest_core::source::{FetchStat, LANE_ALL, LANE_DEFAULT, LANE_WANIP, Source, WorkItem};
 use harvest_core::spool::{Manifest, Spool};
-use serde_json::{Value, json};
+use serde_json::json;
 
 use crate::client::{ApiAction, ClientOptions, RetrySpec, TencentClient};
 use crate::readers::{MapContext, PageSpec, billing, cvm, eip, network, paginate};
@@ -71,6 +71,8 @@ pub struct TencentSource {
     projects: BTreeMap<String, String>,
     page_size: u64,
     allow_empty: AllowEmpty,
+    /// 已解析的范围（地域在 `init` 里确定）。
+    scope: Scope,
     /// 地域是不是 `auto` 解出来的（账号可见地域全集）。
     ///
     /// 它决定这一帧能不能声明 `coverage.scope = account`：手写地域子集时，
@@ -80,12 +82,31 @@ pub struct TencentSource {
     account: Option<String>,
 }
 
+/// 腾讯云要求的凭据键（`[credential]` 下的名字）。
+pub const REQUIRED_CREDENTIALS: &[&str] = &["secret_id", "secret_key"];
+
+/// `[vendor_options]`：腾讯云目前没有额外参数，写任何键都报错（防手误）。
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TencentOptions {}
+
 impl TencentSource {
     /// 解析凭据、建客户端、解析地域（`regions="auto"` 时调 `DescribeRegions`）
     /// 与项目名称表（失败不阻断库存）。
     pub async fn init(cfg: SourceConfig, svc: &ServiceConfig) -> Result<Self, HarvestError> {
-        let secret_id = cfg.credential.secret_id.load()?;
-        let secret_key = cfg.credential.secret_key.load()?;
+        // 适配器只接自己家的配置：registry 已经按 vendor 分发，这里再兜一层，
+        // 防止有人直接构造（比如测试里写错 vendor）。
+        if cfg.vendor() != Vendor::TencentCloud {
+            return Err(HarvestError::new(
+                ErrorClass::InvalidParam,
+                format!("TencentSource 不能处理 vendor = {}", cfg.vendor().as_str()),
+            ));
+        }
+        cfg.credential.expect_only(REQUIRED_CREDENTIALS)?;
+        let _: TencentOptions = harvest_core::config::parse_vendor_options(&cfg)?;
+
+        let secret_id = cfg.credential.get("secret_id")?;
+        let secret_key = cfg.credential.get("secret_key")?;
         // 注册到全局脱敏器：之后任何日志/报告/错误都不可能带出凭据明文。
         redact::register_secret(secret_id.expose());
         redact::register_secret(secret_key.expose());
@@ -122,6 +143,7 @@ impl TencentSource {
             },
         )?;
 
+        let placeholder_scope = cfg.scope(Vec::new());
         let mut source = Self {
             regions_auto: matches!(cfg.regions, RegionsSpec::Auto(_)),
             account: None,
@@ -131,20 +153,19 @@ impl TencentSource {
             projects: BTreeMap::new(),
             page_size: svc.service.page_size,
             allow_empty: svc.service.allow_empty.clone(),
+            scope: placeholder_scope,
         };
 
         source.regions = source.resolve_regions().await?;
         source.projects = source.resolve_projects().await;
         source.account = source.resolve_account().await;
+        source.scope = source
+            .cfg
+            .scope(source.regions.iter().map(|r| r.code.clone()).collect());
         Ok(source)
     }
 
     /// 当前生效的范围（地域已解析）。
-    pub fn scope(&self) -> Scope {
-        self.cfg
-            .scope(self.regions.iter().map(|r| r.code.clone()).collect())
-    }
-
     pub fn regions(&self) -> &[RegionEntry] {
         &self.regions
     }
@@ -160,24 +181,6 @@ impl TencentSource {
     /// 账号键 `vendor:AccountId`（取不到就是 `None`）。
     pub fn account_key(&self) -> Option<&str> {
         self.account.as_deref()
-    }
-
-    /// 抓一个成本范围，逐行交给 `on_row`（有界内存，边抓边写分片）。
-    ///
-    /// 与资产采集分开：成本不走 spool / 数据平面，也不吃 `verify` 那套「帧完整性」
-    /// （分片自身的 `sha256` + 行数就是它的完整性证据）。
-    ///
-    /// `billing_account_uin` 必须由 `sources.d` 里显式配置：账单接口按 UIN 记账，
-    /// 跟凭据里的 SecretId 没有推导关系，不能猜（见 `harvest-app::cost`）。
-    pub async fn fetch_cost<F>(
-        &self,
-        range: &harvest_core::cost::CostRange,
-        mut on_row: F,
-    ) -> Result<billing::BillFetchStat, HarvestError>
-    where
-        F: FnMut(&serde_json::Map<String, serde_json::Value>) -> Result<(), HarvestError>,
-    {
-        billing::fetch_range(&self.client, range, &mut on_row).await
     }
 
     async fn resolve_regions(&self) -> Result<Vec<RegionEntry>, HarvestError> {
@@ -318,7 +321,18 @@ impl TencentSource {
     }
 }
 
-/// 只依赖配置的计划生成，供 `dry-run` 用（不联网）。
+/// 只依赖配置的计划生成，供 `dry-run` / `diagnose` 用（不联网）。
+///
+/// 返回空计划表示 `regions = "auto"`（需要联网才知地域），由调用方标注说明。
+pub fn plan_from_config(cfg: &SourceConfig) -> Result<Vec<WorkItem>, HarvestError> {
+    let regions = match &cfg.regions {
+        RegionsSpec::Explicit(list) => list.clone(),
+        RegionsSpec::Auto(_) => Vec::new(),
+    };
+    Ok(plan_items(cfg, &regions))
+}
+
+/// 只依赖配置的计划生成。
 pub fn plan_items(cfg: &SourceConfig, regions: &[String]) -> Vec<WorkItem> {
     let mut items = Vec::new();
     for region in regions {
@@ -352,6 +366,10 @@ pub fn plan_items(cfg: &SourceConfig, regions: &[String]) -> Vec<WorkItem> {
 impl Source for TencentSource {
     fn vendor(&self) -> Vendor {
         Vendor::TencentCloud
+    }
+
+    fn scope(&self) -> Scope {
+        self.scope.clone()
     }
 
     fn plan(&self) -> Vec<WorkItem> {
@@ -481,12 +499,29 @@ impl Source for TencentSource {
     }
 }
 
-/// 供报告/诊断使用的凭据描述（不含值）。
-pub fn credential_report(cfg: &SourceConfig) -> Value {
-    json!({
-        "secret_id": cfg.credential.secret_id.describe(),
-        "secret_key": cfg.credential.secret_key.describe(),
-    })
+#[async_trait]
+impl harvest_core::source::CostSource for TencentSource {
+    async fn fetch_cost(
+        &self,
+        range: &harvest_core::cost::CostRange,
+        on_row: &mut (dyn FnMut(harvest_core::cost::CostDetail) -> Result<(), HarvestError> + Send),
+    ) -> Result<harvest_core::cost::CostFetchStat, HarvestError> {
+        let currency = self.cfg.cost.currency.clone();
+        let mut out_of_range = 0u64;
+        let mut stat = billing::fetch_range(&self.client, range, |row| {
+            match billing::map_detail(row, range, &currency)? {
+                Some(detail) => on_row(detail),
+                // 整月拉取、按日筛选时的常态。
+                None => {
+                    out_of_range += 1;
+                    Ok(())
+                }
+            }
+        })
+        .await?;
+        stat.out_of_range = out_of_range;
+        Ok(stat)
+    }
 }
 
 #[cfg(test)]
@@ -498,6 +533,7 @@ mod tests {
             r#"
 source_code = "tencent-cloud-prod"
 tenant_id = "tenant-example"
+vendor = "TENCENT_CLOUD"
 regions = ["ap-guangzhou", "ap-shanghai"]
 
 [credential]

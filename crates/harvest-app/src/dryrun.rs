@@ -7,8 +7,9 @@
 use std::path::Path;
 
 use harvest_core::config::{RegionsSpec, ServiceConfig, SourceConfig};
-use harvest_tencent::{credential_report, plan_items};
 use serde_json::json;
+
+use crate::vendor;
 
 pub fn run(config_path: &Path, source_path: &Path) -> i32 {
     let svc = match ServiceConfig::load(config_path) {
@@ -34,7 +35,13 @@ pub fn run(config_path: &Path, source_path: &Path) -> i32 {
         ),
     };
 
-    let items = plan_items(&source_cfg, &regions);
+    let items = match vendor::plan_from_config(&source_cfg) {
+        Ok(items) => items,
+        Err(err) => {
+            eprintln!("采集计划不可用: {err}");
+            return 3;
+        }
+    };
     let plan = items
         .iter()
         .map(|item| {
@@ -73,7 +80,7 @@ pub fn run(config_path: &Path, source_path: &Path) -> i32 {
             "group": source_cfg.group,
             "env_ref": source_cfg.env_ref,
             "producer": format!("{}:{}", source_cfg.source_code, source_cfg.group),
-            "vendor": "TENCENT_CLOUD",
+            "vendor": source_cfg.vendor().as_str(),
             "regions": regions,
             "regions_note": regions_note,
             "assets": {
@@ -83,7 +90,7 @@ pub fn run(config_path: &Path, source_path: &Path) -> i32 {
                 "subnet": source_cfg.assets.subnet,
             },
         },
-        "credential": credential_report(&source_cfg),
+        "credential": source_cfg.credential.describe(),
         "work_items": plan.len(),
         "plan": plan,
     });

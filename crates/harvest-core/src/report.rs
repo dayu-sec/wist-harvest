@@ -65,6 +65,9 @@ pub struct ItemReport {
     pub pages: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expected_rows: Option<u64>,
+    /// 完整性证据（`total` / `exhausted`），排障时能看出这轮靠什么判完整性。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub completeness: Option<crate::source::Completeness>,
     pub retries: u64,
     pub duration_ms: u64,
     pub request_ids: Vec<String>,

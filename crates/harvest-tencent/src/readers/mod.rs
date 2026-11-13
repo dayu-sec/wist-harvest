@@ -13,16 +13,15 @@ pub mod network;
 
 use std::collections::BTreeMap;
 
+use async_trait::async_trait;
 use harvest_core::error::{ErrorClass, HarvestError};
+use harvest_core::page::{PageBatch, PageCursor, PageFetcher};
 use harvest_core::source::FetchStat;
 use serde::Serialize;
 use serde_json::{Map, Value, json};
 
 use crate::client::{ApiAction, TencentClient, request_id};
 use crate::value::{as_i64, as_str};
-
-/// 防御性上限：分页失控时不至于把进程拖死。
-const MAX_PAGES: u64 = 10_000;
 
 /// 一个分页任务的形态。
 #[derive(Debug, Clone)]
@@ -44,38 +43,45 @@ pub struct MapContext<'a> {
     pub projects: &'a BTreeMap<String, String>,
 }
 
-/// 抓一个分页任务：逐页映射 → 逐页落 spool（有界内存）→ 返回完整性证据。
-pub async fn paginate<T, F, S>(
-    client: &TencentClient,
-    spec: &PageSpec,
-    region: &str,
+/// 腾讯云的分页：`Limit` + `Offset` + `TotalCount`。
+///
+/// 循环、总数校验、完整性证据都在 `harvest_core::page` 里，这里只负责
+/// “发哪一页”与“游标怎么推进”。
+struct TencentPageFetcher<'a, F> {
+    client: &'a TencentClient,
+    spec: &'a PageSpec,
+    region: &'a str,
     page_size: u64,
-    mut map_row: F,
-    mut on_page: S,
-) -> Result<FetchStat, HarvestError>
-where
-    T: Serialize,
-    F: FnMut(&Map<String, Value>) -> Result<T, HarvestError>,
-    S: FnMut(&[T]) -> Result<(), HarvestError>,
-{
-    let started = std::time::Instant::now();
-    let mut offset: u64 = 0;
-    let mut total: Option<u64> = None;
-    let mut rows: u64 = 0;
-    let mut pages: u64 = 0;
-    let mut retries: u64 = 0;
-    let mut request_ids: Vec<String> = Vec::new();
+    map_row: F,
+}
 
-    loop {
+#[async_trait]
+impl<F, T> PageFetcher for TencentPageFetcher<'_, F>
+where
+    F: Fn(&Map<String, Value>) -> Result<T, HarvestError> + Send + Sync,
+    T: Serialize + Send + Sync,
+{
+    type Row = T;
+
+    async fn fetch_page(&self, cursor: Option<&PageCursor>) -> Result<PageBatch<T>, HarvestError> {
+        let action = self.spec.action.name;
+        let offset: u64 = match cursor {
+            Some(cursor) => cursor
+                .as_str()
+                .parse()
+                .map_err(|_| HarvestError::data_format(format!("{action} 的分页游标非法")))?,
+            None => 0,
+        };
+
         let mut body = Map::new();
-        if spec.limit_as_string {
-            body.insert("Limit".into(), json!(page_size.to_string()));
+        if self.spec.limit_as_string {
+            body.insert("Limit".into(), json!(self.page_size.to_string()));
             body.insert("Offset".into(), json!(offset.to_string()));
         } else {
-            body.insert("Limit".into(), json!(page_size));
+            body.insert("Limit".into(), json!(self.page_size));
             body.insert("Offset".into(), json!(offset));
         }
-        if let Some(extra) = &spec.extra_body
+        if let Some(extra) = &self.spec.extra_body
             && let Some(extra) = extra.as_object()
         {
             for (key, value) in extra {
@@ -83,96 +89,78 @@ where
             }
         }
 
-        let outcome = client
-            .call(&spec.action, Some(region), &Value::Object(body))
+        let outcome = self
+            .client
+            .call(&self.spec.action, Some(self.region), &Value::Object(body))
             .await
-            .map_err(|err| err.with_region(region))?;
-        retries += u64::from(outcome.retries);
-        if let Some(id) = request_id(&outcome.body) {
-            request_ids.push(id);
-        }
+            .map_err(|err| err.with_region(self.region))?;
 
-        let page_total = as_i64(outcome.body.get("TotalCount")).ok_or_else(|| {
-            HarvestError::data_format(format!("{} 响应缺少 TotalCount", spec.action.name))
-                .with_action(spec.action.name)
-                .with_region(region)
+        let total = as_i64(outcome.body.get("TotalCount")).ok_or_else(|| {
+            HarvestError::data_format(format!("{action} 响应缺少 TotalCount"))
+                .with_action(action)
+                .with_region(self.region)
         })? as u64;
-        match total {
-            None => total = Some(page_total),
-            Some(previous) if previous != page_total => {
-                return Err(HarvestError::integrity(format!(
-                    "{} 分页总数前后不一致: 首页 {previous}，当前页 {page_total}",
-                    spec.action.name
-                ))
-                .with_action(spec.action.name)
-                .with_region(region));
-            }
-            Some(_) => {}
-        }
 
         let items = outcome
             .body
-            .get(spec.set_key)
+            .get(self.spec.set_key)
             .and_then(|v| v.as_array())
             .ok_or_else(|| {
-                HarvestError::data_format(format!(
-                    "{} 响应缺少数组 {}",
-                    spec.action.name, spec.set_key
-                ))
-                .with_action(spec.action.name)
-                .with_region(region)
+                HarvestError::data_format(format!("{action} 响应缺少数组 {}", self.spec.set_key))
+                    .with_action(action)
+                    .with_region(self.region)
             })?;
 
-        pages += 1;
-        let mut page_rows = Vec::with_capacity(items.len());
+        let mut rows = Vec::with_capacity(items.len());
         for item in items {
             let obj = item.as_object().ok_or_else(|| {
-                HarvestError::data_format(format!("{} 的数组元素不是对象", spec.set_key))
-                    .with_action(spec.action.name)
-                    .with_region(region)
+                HarvestError::data_format(format!("{} 的数组元素不是对象", self.spec.set_key))
+                    .with_action(action)
+                    .with_region(self.region)
             })?;
-            page_rows.push(map_row(obj)?);
+            rows.push((self.map_row)(obj)?);
         }
-        rows += page_rows.len() as u64;
-        on_page(&page_rows)?;
 
-        if items.is_empty() {
-            break;
-        }
-        // 用实际返回条数推进，而不是假定每页满 page_size。
-        offset += items.len() as u64;
-        if offset >= page_total {
-            break;
-        }
-        if pages >= MAX_PAGES {
-            return Err(HarvestError::data_format(format!(
-                "{} 分页超过 {MAX_PAGES} 页，疑似服务端 TotalCount 异常",
-                spec.action.name
-            ))
-            .with_action(spec.action.name)
-            .with_region(region));
-        }
+        // 用实际返回条数推进，而不是假定每页满 `page_size`。
+        let next = if rows.is_empty() {
+            None
+        } else {
+            let next_offset = offset + rows.len() as u64;
+            (next_offset < total).then(|| PageCursor::new(next_offset.to_string()))
+        };
+
+        Ok(PageBatch {
+            rows,
+            next,
+            total: Some(total),
+            request_id: request_id(&outcome.body),
+            retries: outcome.retries,
+        })
     }
+}
 
-    if let Some(expected) = total
-        && expected != rows
-    {
-        return Err(HarvestError::integrity(format!(
-            "分页总数不一致: {} 云端 TotalCount={expected}，实收={rows}",
-            spec.action.name
-        ))
-        .with_action(spec.action.name)
-        .with_region(region));
-    }
-
-    Ok(FetchStat {
-        rows,
-        pages,
-        expected_rows: total,
-        retries,
-        request_ids,
-        duration_ms: started.elapsed().as_millis() as u64,
-    })
+/// 抓一个分页任务：逐页映射 → 逐页落 spool（有界内存）→ 返回完整性证据。
+pub async fn paginate<T, F, S>(
+    client: &TencentClient,
+    spec: &PageSpec,
+    region: &str,
+    page_size: u64,
+    map_row: F,
+    on_page: S,
+) -> Result<FetchStat, HarvestError>
+where
+    T: Serialize + Send + Sync,
+    F: Fn(&Map<String, Value>) -> Result<T, HarvestError> + Send + Sync,
+    S: FnMut(&[T]) -> Result<(), HarvestError> + Send,
+{
+    let fetcher = TencentPageFetcher {
+        client,
+        spec,
+        region,
+        page_size,
+        map_row,
+    };
+    harvest_core::page::drive(&fetcher, on_page).await
 }
 
 /// 计费方式代码 → 名称。未识别代码原样保留，不硬套枚举。

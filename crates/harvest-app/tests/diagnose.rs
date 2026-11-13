@@ -45,6 +45,7 @@ endpoint = "warp-parse:9100"
             r#"
 source_code = "tencent-cloud-prod"
 tenant_id = "tenant-example"
+vendor = "TENCENT_CLOUD"
 regions = ["ap-guangzhou"]
 
 [credential]
@@ -160,6 +161,7 @@ endpoint = "127.0.0.1:9100"
             r#"
 source_code = "tencent-cloud-prod"
 tenant_id = "tenant-example"
+vendor = "TENCENT_CLOUD"
 regions = ["ap-guangzhou"]
 
 [credential]
@@ -215,6 +217,7 @@ endpoint = "warp-parse:9100"
             r#"
 source_code = "tencent-cloud-prod"
 tenant_id = "tenant-example"
+vendor = "TENCENT_CLOUD"
 regions = ["ap-guangzhou"]
 
 [credential]

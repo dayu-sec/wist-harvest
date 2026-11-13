@@ -596,6 +596,20 @@ fn prune_stale_shards(object_dir: &Path, shards: &[CostShard]) {
     }
 }
 
+/// 一次成本抓取的统计。
+///
+/// 与资产的 [`crate::source::FetchStat`] 分开：成本没有 spool / 帧完整性那一套，
+/// 完整性证据是分片自身的 `sha256` + 行数（契约 §2）。
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct CostFetchStat {
+    pub rows: u64,
+    pub pages: u64,
+    pub retries: u64,
+    pub request_ids: Vec<String>,
+    /// 云 API 返回了、但不在本范围里被丢掉的明细（整月查询筛单日时的常态）。
+    pub out_of_range: u64,
+}
+
 /// 分片里出现过的账期分布（给运行报告用）。
 pub fn month_histogram(details: &[CostDetail]) -> BTreeMap<String, u64> {
     let mut hist = BTreeMap::new();

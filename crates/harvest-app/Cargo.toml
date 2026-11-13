@@ -16,6 +16,7 @@ path = "src/main.rs"
 [dependencies]
 harvest-core.workspace = true
 harvest-tencent.workspace = true
+harvest-aws.workspace = true
 harvest-warp.workspace = true
 chrono.workspace = true
 clap.workspace = true

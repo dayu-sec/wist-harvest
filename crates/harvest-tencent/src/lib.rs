@@ -10,4 +10,4 @@ pub mod source;
 pub mod tc3;
 pub mod value;
 
-pub use source::{TencentSource, credential_report, plan_items};
+pub use source::{REQUIRED_CREDENTIALS, TencentSource, plan_from_config, plan_items};

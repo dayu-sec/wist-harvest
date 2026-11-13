@@ -10,21 +10,49 @@ wist-harvest ──原生快照帧──► warp-parse ──atlas.in.<family>.v
 设计依据：[`../wist-harvest-设计说明.md`](../wist-harvest-设计说明.md)（权威）与
 [`../云资产与成本采集说明.md`](../云资产与成本采集说明.md) §2/§3。
 
-## P0 范围
+## 范围
 
-- 采集组 `inventory`，四个类型，全部来自腾讯云：
+- 采集组 `inventory`，四个类型；目前两家云：**腾讯云**、**AWS**。
 
-| 类型 | 云 API | 备注 |
-| --- | --- | --- |
-| `CLOUD_HOST` | `cvm.DescribeInstances`（2017-03-12） | 每地域 1 道分页 |
-| `EIP` | `vpc.DescribeAddresses`（2017-03-12） | **每地域 2 道分页**，按 `AddressId` 合并去重 |
-| `VPC` | `vpc.DescribeVpcs`（2017-03-12） | `Limit`/`Offset` 用字符串形式 |
-| `SUB_NET` | `vpc.DescribeSubnets`（2017-03-12） | 同上 |
+| 类型 | 腾讯云 | AWS | 备注 |
+| --- | --- | --- | --- |
+| `CLOUD_HOST` | `cvm.DescribeInstances` | `ec2.DescribeInstances` | 腾讯云每地域 1 道分页；AWS 用 `NextToken` 游标 |
+| `EIP` | `vpc.DescribeAddresses` | `ec2.DescribeAddresses` | 腾讯云**每地域 2 道**（`wanip`/`all`）按 `AddressId` 去重；AWS 1 道 |
+| `VPC` | `vpc.DescribeVpcs` | `ec2.DescribeVpcs` | 腾讯云 `Limit`/`Offset` 用字符串形式 |
+| `SUB_NET` | `vpc.DescribeSubnets` | `ec2.DescribeSubnets` | 同上 |
 
 - 状态机 `Planned → Fetching → Spooled → Verified → Published → Done`，
   任一步失败进 `Aborted` 且**数据平面零帧**。
 - 凭据只从 `${SEC_*}` 或 0600 文件读，任何日志/报告/错误都过统一的脱敏器。
 - 不做：安全组/路由/CLB、任何 git 操作。
+
+## 多云：什么东西放在哪一层
+
+新增一家云 = 新增一个 `harvest-{vendor}` crate + 在 `vendor` 注册表加一条分支
++ 在 `sources.d` 里写 `vendor = "..."`。**core 不需要改**，这是分层的验收线。
+
+| 层 | 位置 | 放什么 | 不放什么 |
+| --- | --- | --- | --- |
+| 配置 | `harvest.toml` / `sources.d/*.toml` | 租户/数据源身份、`vendor`、地域范围、`[assets]` 开关、凭据引用、限速/超时/页大小、`allow_empty`、`max_resume_age_ms`、账单账号与币种、`[vendor_options]` | 签名、分页协议、字段映射、金额解析、完整性判据 |
+| 共享代码 | `harvest-core` | 快照契约/规范模型、scope/snap_id、spool/manifest/续跑、状态机、完整性**框架**、分页**驱动**、错误分类、限速/重试、脱敏、report、wire/sink | 任何云 API 的形状 |
+| 厂商代码 | `harvest-{vendor}` | 签名、端点、分页协议、错误码→`ErrorClass`、字段归一、必填/去重键、完整性**证据**、地域/身份解析、coverage 判定、账单 reader | 现场值（租户、地域、配额） |
+
+两条硬规则：
+
+1. **配置只能收紧能力，不能扩张能力**：`assets.vpc = false` 合法；打开一个该云不提供的类型
+   必须在启动时失败（`capabilities` / `plan` 层面拦住）。
+2. **有逻辑的东西不进配置**：字段路径、分页终止条件、金额/时间解析、状态枚举、去重键、
+   签名算法。它们写错不会报错，只会静默错数据——必须是可编译、可 fixture 测试的代码。
+
+已落地的跨云抽象：
+
+- `Vendor` 闭枚举 + `vendor` 必填字段（写错/漏写直接启动失败）；
+- `harvest-core::page`：`PageFetcher` + 驱动（总数一致、空页但有下一页、游标不前进、页数上限）；
+- `Completeness::{Total, Exhausted}`：**没有总数的云靠「游标耗尽」作为完整性证据**，
+  不再出现「没有 TotalCount 就跳过校验」；
+- 凭据表 `[credential]` 的键名由厂商定义（腾讯云 `secret_id`/`secret_key`，
+  AWS `access_key_id`/`secret_access_key`/`session_token`），core 只负责「从哪读」与脱敏；
+- `[vendor_options]` 由厂商 crate 强类型解析（`deny_unknown_fields`），core 不解析。
 
 ## 成本链路（并列主干，不进数据平面）
 
@@ -34,7 +62,8 @@ wist-harvest ──原生快照帧──► warp-parse ──atlas.in.<family>.v
 
 | 类型 | 云 API | 备注 |
 | --- | --- | --- |
-| 账单明细 | `billing.DescribeBillDetail`（2018-07-09） | 单页上限 **300**（1000 会被 `#Limit` 拒）；按 `bill_month` 整月拉一遍，日口径在本地筛 |
+| 账单明细（腾讯云） | `billing.DescribeBillDetail`（2018-07-09） | 单页上限 **300**（1000 会被 `#Limit` 拒）；按 `bill_month` 整月拉一遍，日口径在本地筛 |
+| 账单（AWS） | — | **尚未实现**：`cost` 会明确报错，不会静默按腾讯云跑 |
 
 ```bash
 # 整月账单（CHARGE），默认上一个自然月
@@ -68,11 +97,12 @@ wist-harvest/
 ├── _gal/                       # gx 工作区（gx init project --path rust 生成）
 ├── version.txt                 # 版本唯一来源
 ├── Cargo.toml                  # workspace（版本 marker 在 [workspace.package]）
-├── docs/examples/              # harvest.toml + sources.d 样例
+├── docs/examples/              # harvest.toml + 腾讯云/AWS 的 sources.d 样例
 └── crates/
-    ├── harvest-core/           # 与厂商无关：config/scope/spool/manifest/完整性/
+    ├── harvest-core/           # 与厂商无关：config/scope/page/spool/manifest/完整性/
     │                           #   租约/限速/脱敏/状态机/调度/编排
     ├── harvest-tencent/        # TC3-HMAC-SHA256 签名 + 四个 reader + 字段归一
+    ├── harvest-aws/            # SigV4 签名 + ec2 reader（XML / NextToken）+ STS 身份
     ├── harvest-warp/           # 数据平面 sink：TLS + 长度前缀帧
     └── harvest-app/            # lib（once/run/dry-run/diagnose）+ bin `wist-harvest`
 ```
@@ -92,9 +122,8 @@ cargo clippy --all-targets --all-features -- -D warnings
 cargo test
 ```
 
-> 注意：`gx run lint` 里的 `cargo fix` 在没有版本库的目录会直接报
-> `no VCS found for this package`（cargo 自身的保护）。本阶段按要求没有执行任何
-> git 操作，所以门禁用的是上面三行等价命令；仓库入库后 `gx run lint` 即可使用。
+> 注意：`gx run lint` 里的 `cargo fix` 需要版本库；仓库已入库，可直接使用。
+> 等价的三行门禁如下。
 
 ## 用法
 
@@ -116,13 +145,30 @@ wist-harvest run --config ... --source ...
 退出码：`once` → `0` = `Done`；`2` = `Aborted`（已有报告与 spool）；`3` = 配置/凭据/数据源初始化失败。
 `run` 优雅退出后恒为 `0`；`diagnose` → 全 OK `0`，任一 FAIL `1`。
 
-配置文件样例见 [`docs/examples/`](docs/examples/)。凭据永远不写在配置里：
+配置文件样例见 [`docs/examples/`](docs/examples/)（腾讯云与 AWS 各一份）。
+凭据永远不写在配置里，而且**键名由厂商定义**：
 
 ```toml
+# 腾讯云
+vendor = "TENCENT_CLOUD"
 [credential]
 secret_id  = { env = "SEC_TENCENT_SECRET_ID" }
 secret_key = { env = "SEC_TENCENT_SECRET_KEY" }
+
+# AWS
+vendor = "AWS"
+[credential]
+access_key_id     = { env = "SEC_AWS_ACCESS_KEY_ID" }
+secret_access_key = { env = "SEC_AWS_SECRET_ACCESS_KEY" }
+# session_token 可选（临时凭据）
 # 或 { file = "/path/secret.json", field = "secret_key" }（文件必须 0600）
+```
+
+AWS 的专属参数放在 `[vendor_options]`（core 不解析，由 `harvest-aws` 强类型校验）：
+
+```toml
+[vendor_options]
+partition = "aws"   # aws / aws-cn / aws-us-gov
 ```
 
 ## 常驻调度：`run`
@@ -192,7 +238,10 @@ spool/state 目录可写、数据平面端点可解析、是否有可续跑 spoo
    开新 `snap_id` 重采——否则一份永远续不完的旧 spool 会让采集器永不发布。
 6. **读文件本身**：组装前核对每个工作项的实际行数与 manifest 一致，文件缺失/行数不符
    一律 `Aborted`（只信 manifest 会把"文件没了"发成"这类资产 0 行"）。
-7. **凭据零泄漏**：`secret_id`/`secret_key` 真实值注册到全局脱敏器，
+7. **完整性证据两种形态**：有总数的云（腾讯云/阿里云）看「实收 == `TotalCount`」；
+   无总数的云（AWS/Azure）看「游标耗尽」。两者都记到 manifest 的 `completeness` 里，
+   **不存在「没有 TotalCount 就不校验」的路径**；旧 manifest 回落 `expected_rows`。
+8. **凭据零泄漏**：凭据表里的真实值全部注册到全局脱敏器，
    日志/报告/manifest 失败原因都过一遍；云 API 错误体裁到 `Code`/`Message`/`RequestId`。
 
 ## spool 目录
@@ -212,9 +261,9 @@ spool/state 目录可写、数据平面端点可解析、是否有可续跑 spoo
 ## 取舍与偏离（P0 明确做了选择的地方）
 
 1. **没有 `harvest-source` crate。** 设计说明 §3 的目录里有一个独立的
-   `harvest-source`（`Source` 契约）。P0 只有一个厂商实现，多一个只有 trait 的
-   crate 收益为零，所以 `Source`/`Sink` 契约放在 `harvest-core::source`。
-   真要引入第二家厂商时再抽出去，改动只是 `pub use`。
+   `harvest-source`（`Source` 契约）。两家厂商（腾讯云/AWS）共用的只有接口与驱动，
+   量级还撑不起一个独立 crate，所以 `Source`/`Sink`/`CostSource` 契约与 `page` 驱动
+   都在 `harvest-core`。真要再膨胀时再抽，改动只是 `pub use`。
 2. **`snap_id` 里的 `:` 换成 `-`。** 公式是 `{producer}-{scope_hash}-{ts}`，而
    `producer = {source_code}:{group}`。`snap_id` 要当目录名用，所以实际落盘形态是
    `tencent-cloud-prod-inventory-<hash>-<ts>`。另外 `snap_id` 时间戳只到秒，
@@ -249,16 +298,18 @@ spool/state 目录可写、数据平面端点可解析、是否有可续跑 spoo
 
 ## TODO（明确没做）
 
+- **AWS 的成本链路**（CUR / Cost Explorer）—— `cost` 对 AWS 会明确报错；
+  接入前需要和 `wist-cost` 一起把契约里的 `vendor` 枚举与账单口径定版；
 - 成本：18 个月回填的编排（现在是「一个范围跑一次」，外层脚本串）；COS 直传（现在只写本地目录）；
 - `exposure` 组（安全组 + 规则、路由、对等连接、NAT/CCN、CLB）；
 - `env_ref` 的语义（设计 §9 缺口 3）：当前按配置直传，不做账号/项目/VPC 的切分推导；
 - `harvest_*` Prometheus 指标（报告已落盘，指标端点未接）；
 - 报告查询接口（现在只有文件）；
-- `Aborted` spool 的 TTL 清理；
+- `Aborted` spool 的 TTL 清理（现在只做到「超龄不再续跑」，不删目录）；
 - 并发抓取（`service.concurrency` 已解析但未生效）；
 - 调度：没有跨重启的"上次定点"记录（重启后按当前墙钟算下一次）；
   `--interval` 也不跨重启延续节奏；
 - 调度：没有持久化"连续失败次数"，重启后退避从第 1 级重新开始；
-- 真实云账号的联调：`DescribeVpcs`/`DescribeSubnets` 的字符串分页参数、
-  `framing="len"` 的帧上限与字节序；
+- AWS 的联调：真实签名/分区/STS 临时凭据（目前用固定向量 + mock 验证）；
+  腾讯云的 `DescribeVpcs`/`DescribeSubnets` 字符串分页参数仍需真实账号确认；
 - 单帧上限超限时的下游分片组装（设计 §9 缺口 2）。

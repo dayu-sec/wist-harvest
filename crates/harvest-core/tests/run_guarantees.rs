@@ -15,7 +15,7 @@ use harvest_core::model::{AssetType, CloudHost, Vendor};
 use harvest_core::run::{RunOptions, run_once};
 use harvest_core::scope::Scope;
 use harvest_core::source::{
-    CompleteSnapshot, FetchStat, LANE_DEFAULT, PublishAck, Sink, Source, WorkItem,
+    CompleteSnapshot, Completeness, FetchStat, LANE_DEFAULT, PublishAck, Sink, Source, WorkItem,
 };
 use harvest_core::spool::Spool;
 use harvest_core::state::RunState;
@@ -71,6 +71,20 @@ impl Source for FakeSource {
         Vendor::TencentCloud
     }
 
+    fn scope(&self) -> Scope {
+        let mut regions: Vec<String> = self.plan.iter().map(|item| item.region.clone()).collect();
+        regions.sort();
+        regions.dedup();
+        Scope::new(
+            "tenant-example",
+            "tencent-cloud-prod",
+            "inventory",
+            "prod",
+            Vendor::TencentCloud,
+            regions,
+        )
+    }
+
     fn plan(&self) -> Vec<WorkItem> {
         self.plan.clone()
     }
@@ -95,10 +109,12 @@ impl Source for FakeSource {
             .collect();
         spool.append_rows(item, &rows)?;
 
+        let total = self.expected_rows.unwrap_or(rows.len() as u64);
         Ok(FetchStat {
             rows: rows.len() as u64,
             pages: 1,
-            expected_rows: Some(self.expected_rows.unwrap_or(rows.len() as u64)),
+            completeness: Some(Completeness::Total { total }),
+            expected_rows: Some(total),
             retries: 0,
             request_ids: vec![format!("req-{}", item.key())],
             duration_ms: 1,

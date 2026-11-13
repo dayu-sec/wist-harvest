@@ -15,7 +15,6 @@ use harvest_core::redact;
 use harvest_core::report::RunReport;
 use harvest_core::run::{CancelFlag, RunOptions, run_once};
 use harvest_core::state::RunState;
-use harvest_tencent::TencentSource;
 use harvest_warp::WarpSink;
 
 pub struct RoundConfig {
@@ -71,10 +70,11 @@ pub async fn execute_with(
 ) -> Result<RoundSummary, HarvestError> {
     // 先建 sink：端点/证书有问题就在联网抓取前失败。
     let sink = WarpSink::from_settings(&cfg.service.sink)?;
-    let source = TencentSource::init(cfg.source.clone(), &cfg.service).await?;
+    // 按 `vendor` 构建适配器；后续代码不认识具体云。
+    let source = crate::vendor::build_source(&cfg.source, &cfg.service).await?;
     let scope = source.scope();
 
-    let outcome = run_once(&cfg.service, &scope, &source, &sink, &opts).await;
+    let outcome = run_once(&cfg.service, &scope, source.as_ref(), &sink, &opts).await;
     Ok(RoundSummary {
         state: outcome.state,
         snap_id: outcome.snap_id,

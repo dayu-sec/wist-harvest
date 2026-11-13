@@ -11,6 +11,7 @@ pub mod error;
 pub mod integrity;
 pub mod lease;
 pub mod model;
+pub mod page;
 pub mod ratelimit;
 pub mod redact;
 pub mod report;

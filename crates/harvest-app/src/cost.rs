@@ -12,6 +12,7 @@ use chrono::{Datelike, FixedOffset, NaiveDate, Utc};
 use harvest_core::cost::{
     COST_MANIFEST_SCHEMA, CostBasis, CostRange, CostShardWriter, PeriodSource,
 };
+use harvest_core::error::HarvestError;
 use harvest_core::model::Vendor;
 use serde_json::json;
 
@@ -41,8 +42,7 @@ pub async fn run(
         }
     };
 
-    let source = match harvest_tencent::TencentSource::init(cfg.source.clone(), &cfg.service).await
-    {
+    let source = match crate::vendor::build_cost_source(&cfg.source, &cfg.service).await {
         Ok(source) => source,
         Err(err) => {
             eprintln!("数据源初始化失败: {err}");
@@ -70,24 +70,10 @@ pub async fn run(
     )
     .with_rows_per_shard(cfg.source.cost.rows_per_shard);
 
-    let mut out_of_range: u64 = 0;
-    let outcome = source
-        .fetch_cost(&range, |row| {
-            match harvest_tencent::readers::billing::map_detail(
-                row,
-                &range,
-                &cfg.source.cost.currency,
-            ) {
-                Ok(Some(detail)) => writer.push(detail)?,
-                // 不在本范围（按日范围从整月数据里筛出来时的常态）。
-                Ok(None) => out_of_range += 1,
-                Err(err) => return Err(err),
-            }
-            Ok(())
-        })
-        .await;
-
-    let stat = match outcome {
+    let mut on_row = |detail: harvest_core::cost::CostDetail| -> Result<(), HarvestError> {
+        writer.push(detail)
+    };
+    let stat = match source.fetch_cost(&range, &mut on_row).await {
         Ok(stat) => stat,
         Err(err) => {
             // 失败就**不发布**：分片只在暂存区，已发布的批次一字未动。
@@ -96,6 +82,7 @@ pub async fn run(
         }
     };
     writer.set_request_ids(stat.request_ids.clone());
+    let out_of_range = stat.out_of_range;
 
     let (manifest_path, manifest) = match writer.finish() {
         Ok(done) => done,
@@ -182,12 +169,12 @@ fn build_range(
 /// 账单口径是 UIN。账号键是 `vendor:uin`，这里取后段。
 fn billing_account_uin(cfg: &RoundConfig) -> Result<String, String> {
     // 数据源里显式写了就用它（联调 / 代客采集时账号键与凭据可能不同）。
-    if let Some(uin) = &cfg.source.billing_account_uin {
+    if let Some(uin) = &cfg.source.billing_account {
         return Ok(uin.clone());
     }
     Err(
-        "数据源没有 `billing_account_uin`：账单接口按 UIN 记账，不能从凭据里猜。\
-         请在 sources.d/<source>.toml 里写上 `billing_account_uin = \"1000...\"`"
+        "数据源没有 `billing_account`：账单接口按账号记账（腾讯云是 UIN），不能从凭据里猜。\
+         请在 sources.d/<source>.toml 里写上 `billing_account = \"1000...\"`"
             .to_string(),
     )
 }

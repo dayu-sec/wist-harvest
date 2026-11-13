@@ -73,6 +73,10 @@ pub struct ItemRecord {
     /// 云端声明的总数，完整性校验用。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_rows: Option<u64>,
+    /// 完整性证据（`Total` / `Exhausted`）。旧 manifest 没有这个字段时
+    /// 由 `expected_rows` 回退（见 `integrity::verify_manifest`）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completeness: Option<crate::source::Completeness>,
     #[serde(default)]
     pub retries: u64,
     #[serde(default)]
@@ -96,6 +100,7 @@ impl ItemRecord {
             rows: 0,
             pages: 0,
             expected_rows: None,
+            completeness: None,
             retries: 0,
             duration_ms: 0,
             request_ids: Vec::new(),
@@ -378,6 +383,7 @@ impl Spool {
         record.pages = 0;
         record.request_ids.clear();
         record.expected_rows = None;
+        record.completeness = None;
         record.retries = 0;
         record.duration_ms = 0;
         record.completed = false;
@@ -423,6 +429,7 @@ impl Spool {
         record.rows = stat.rows;
         record.pages = stat.pages;
         record.expected_rows = stat.expected_rows;
+        record.completeness = stat.completeness.clone();
         record.retries = stat.retries;
         record.duration_ms = stat.duration_ms;
         record.request_ids = stat.request_ids.clone();

@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+### 多云（P0 解耦 + P1 第二家云）
+
+- **`vendor` 成为必填配置**：`sources.d` 里显式写 `vendor = "TENCENT_CLOUD" | "AWS"`；
+  漏写/写错一律启动失败，不再“默认按腾讯云跑”。
+- **厂商注册表**：`harvest-app::vendor` 按 `vendor` 构建 `Box<dyn Source>` / `Box<dyn CostSource>`；
+  `dry-run` / `diagnose` 走不联网的 `plan_from_config`。app 不再直接依赖某个云的类型。
+- **凭据表按厂商定义形状**：`[credential]` 是键值表（腾讯云 `secret_id`/`secret_key`，
+  AWS `access_key_id`/`secret_access_key`/`session_token`），core 只负责「从哪读」与脱敏；
+  厂商专属参数放 `[vendor_options]`，由对应 crate 用 `deny_unknown_fields` 强类型解析。
+- **分页驱动下沉到 core**（`harvest-core::page`）：`PageFetcher` + 驱动负责逐页落 spool、
+  总数前后一致、空页但还有下一页、游标不前进、页数上限；腾讯云的 `Limit`/`Offset`
+  与 AWS 的 `NextToken` 各自实现协议。
+- **完整性证据显式化**：`Completeness::{Total, Exhausted}` 写进 manifest；
+  **没有总数的云（AWS）靠游标耗尽作为证据**，不存在“没 TotalCount 就不校验”的路径。
+- **新增 `harvest-aws`**：SigV4 签名（独立 Python 固定向量）、EC2 Query XML reader
+  （instances/addresses/vpcs/subnets）、STS 身份与 `DescribeRegions`（排除 `not-opted-in`）、
+  `[vendor_options].partition`（`aws`/`aws-cn`/`aws-us-gov`）。AWS 的 EIP 只有一路。
+- AWS 账单采集**未实现**：`cost` 对 AWS 明确报错，不静默按腾讯云跑。
+- 配置字段 `billing_account_uin` 泛化为 `billing_account`（保留旧名作为 alias）。
+
 ### 正确性（不完整不发 / 不误删）
 
 - **覆盖范围按类型收敛**：`regions="auto"` 但关掉了某一类资产时，`coverage.scope`

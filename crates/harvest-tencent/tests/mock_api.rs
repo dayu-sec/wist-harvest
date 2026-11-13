@@ -14,7 +14,7 @@ use async_trait::async_trait;
 use harvest_core::config::{ServiceConfig, SourceConfig};
 use harvest_core::error::HarvestError;
 use harvest_core::run::{RunOptions, run_once};
-use harvest_core::source::{CompleteSnapshot, PublishAck, Sink};
+use harvest_core::source::{CompleteSnapshot, PublishAck, Sink, Source};
 use harvest_core::state::RunState;
 use harvest_tencent::TencentSource;
 use serde_json::{Value, json};
@@ -331,6 +331,7 @@ fn source_config_with_assets(dir: &Path, base: &str, regions: &str, assets: &str
         r#"
 source_code = "tencent-cloud-prod"
 tenant_id = "tenant-example"
+vendor = "TENCENT_CLOUD"
 group = "inventory"
 env_ref = "prod"
 regions = {regions}
@@ -517,9 +518,16 @@ async fn page_total_mismatch_aborts_and_sends_nothing() {
     // 云端声称 5 台，只给 2 台：分页没抓完。
     let handler: Handler = Arc::new(|action: &str, body: &Value| {
         if action == "DescribeInstances" {
+            // 第一页给 2 条，之后给空页：模拟“分页提前结束”而云端总数仍是 5。
+            let offset = body["Offset"].as_u64().unwrap_or(0);
+            let set = if offset == 0 {
+                json!([instance("ins-1"), instance("ins-2")])
+            } else {
+                json!([])
+            };
             json!({
                 "TotalCount": 5,
-                "InstanceSet": [instance("ins-1"), instance("ins-2")],
+                "InstanceSet": set,
                 "RequestId": "req-broken"
             })
         } else {

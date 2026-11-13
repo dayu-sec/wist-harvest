@@ -196,6 +196,20 @@ impl Source for FailingSource {
         Vendor::TencentCloud
     }
 
+    fn scope(&self) -> Scope {
+        let mut regions: Vec<String> = self.plan.iter().map(|item| item.region.clone()).collect();
+        regions.sort();
+        regions.dedup();
+        Scope::new(
+            "tenant-example",
+            "tencent-cloud-prod",
+            "inventory",
+            "prod",
+            Vendor::TencentCloud,
+            regions,
+        )
+    }
+
     fn plan(&self) -> Vec<WorkItem> {
         self.plan.clone()
     }
@@ -216,6 +230,7 @@ impl Source for FailingSource {
         Ok(FetchStat {
             rows: 1,
             pages: 1,
+            completeness: Some(harvest_core::source::Completeness::Total { total: 1 }),
             expected_rows: Some(1),
             ..Default::default()
         })

@@ -151,15 +151,29 @@ impl std::str::FromStr for AssetType {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum Vendor {
+    #[serde(rename = "TENCENT_CLOUD", alias = "tencent", alias = "tencent_cloud")]
     TencentCloud,
+    #[serde(rename = "AWS", alias = "aws")]
+    Aws,
 }
 
 impl Vendor {
+    pub const ALL: [Vendor; 2] = [Vendor::TencentCloud, Vendor::Aws];
+
     pub fn as_str(self) -> &'static str {
         match self {
             Self::TencentCloud => "TENCENT_CLOUD",
+            Self::Aws => "AWS",
+        }
+    }
+
+    /// 配置里的取值（`sources.d` 的 `vendor = ...`）。故意用小写：配置文件是给人写的，
+    /// 上报用 [`Vendor::as_str`]；两者都能被 serde 接受（见上面的 `alias`）。
+    pub fn config_name(self) -> &'static str {
+        match self {
+            Self::TencentCloud => "tencent",
+            Self::Aws => "aws",
         }
     }
 
@@ -171,6 +185,7 @@ impl Vendor {
     pub fn key(self) -> &'static str {
         match self {
             Self::TencentCloud => "tencent",
+            Self::Aws => "aws",
         }
     }
 }

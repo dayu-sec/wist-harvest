@@ -10,3 +10,4 @@ pub mod dryrun;
 pub mod once;
 pub mod round;
 pub mod serve;
+pub mod vendor;

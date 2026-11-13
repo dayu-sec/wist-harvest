@@ -10,7 +10,7 @@
 
 use std::path::Path;
 
-use harvest_core::config::{RegionsSpec, SecretRef, ServiceConfig, SourceConfig};
+use harvest_core::config::{RegionsSpec, ServiceConfig, SourceConfig};
 use harvest_core::redact;
 use harvest_core::spool::Spool;
 use serde_json::{Value, json};
@@ -151,26 +151,37 @@ pub fn diagnose(config_path: &Path, source_path: &Path) -> DiagnoseReport {
 }
 
 fn check_credential(source: &SourceConfig) -> Check {
-    let refs: [(&'static str, &SecretRef); 2] = [
-        ("secret_id", &source.credential.secret_id),
-        ("secret_key", &source.credential.secret_key),
-    ];
     let mut detail = serde_json::Map::new();
     let mut ok = true;
-    for (name, reference) in refs {
-        // 能读出来才算"存在"。读到的值只用来注册脱敏，不落任何输出。
-        match reference.load() {
+    let described = source.credential.describe();
+
+    // 逐个读：能读出来才算「存在」。读到的值只用来注册脱敏，不落任何输出。
+    for name in source.credential.names() {
+        let description = described.get(name).cloned().unwrap_or(Value::Null);
+        match source.credential.load(name) {
             Ok(secret) => {
                 redact::register_secret(secret.expose());
-                detail.insert(name.to_string(), reference.describe());
+                detail.insert(name.to_string(), description);
             }
             Err(err) => {
                 ok = false;
-                detail.insert(name.to_string(), reference.describe());
+                detail.insert(name.to_string(), description);
                 detail.insert(format!("{name}_error"), json!(err.to_string()));
             }
         }
     }
+
+    // 该厂商必填的键必须在：漏一个就是「配置看起来对、启动就失败」。
+    let required = crate::vendor::required_credentials(source.vendor());
+    for name in required {
+        if !source.credential.names().any(|existing| existing == *name) {
+            ok = false;
+            detail.insert(format!("{name}_missing"), json!(true));
+        }
+    }
+    detail.insert("vendor".to_string(), json!(source.vendor().as_str()));
+    detail.insert("required".to_string(), json!(required));
+
     Check {
         name: "credential",
         ok,
@@ -276,21 +287,21 @@ fn check_resumable(spool_dir: &Path, source: &SourceConfig) -> Check {
 }
 
 fn check_plan(source: &SourceConfig) -> Check {
-    let regions = match &source.regions {
-        RegionsSpec::Explicit(list) => list.clone(),
-        RegionsSpec::Auto(_) => Vec::new(),
-    };
-    let items = harvest_tencent::plan_items(source, &regions);
+    let items = crate::vendor::plan_from_config(source);
     Check {
         name: "plan",
-        ok: true,
-        detail: json!({
-            "work_items": items.len(),
-            "note": match &source.regions {
-                RegionsSpec::Auto(_) => "regions=auto：运行时解析后生成",
-                RegionsSpec::Explicit(_) => "按配置地域生成",
-            },
-        }),
+        ok: items.is_ok(),
+        detail: match items {
+            Ok(items) => json!({
+                "vendor": source.vendor().as_str(),
+                "work_items": items.len(),
+                "note": match &source.regions {
+                    RegionsSpec::Auto(_) => "regions=auto：运行时解析后生成",
+                    RegionsSpec::Explicit(_) => "按配置地域生成",
+                },
+            }),
+            Err(err) => json!(err.to_string()),
+        },
     }
 }
 

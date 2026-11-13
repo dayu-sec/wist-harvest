@@ -561,6 +561,9 @@ impl ServiceConfig {
 pub struct SourceConfig {
     pub source_code: String,
     pub tenant_id: String,
+    /// 云厂商（选择适配器）。必填：不写就不能猜——猜错会把一个账号的数据按另一家的
+    /// API 去采，错得静默且彻底。
+    pub vendor: Vendor,
     #[serde(default = "default_env_ref")]
     pub env_ref: String,
     #[serde(default = "default_group")]
@@ -572,15 +575,25 @@ pub struct SourceConfig {
     pub region_names: BTreeMap<String, String>,
     #[serde(default)]
     pub assets: AssetToggles,
-    /// 账单账号 UIN（`100041355715`）。**账单接口按 UIN 记账**，跟凭据里的
-    /// SecretId 没有推导关系，所以必须显式写；只有跑成本链路时才必需。
-    #[serde(default)]
-    pub billing_account_uin: Option<String>,
+    /// 账单账号标识。腾讯云是 UIN（`100041355715`），账单接口按它记账，
+    /// 跟凭据里的 SecretId 没有推导关系，所以必须显式写；只有跑成本链路时才必需。
+    #[serde(default, alias = "billing_account_uin")]
+    pub billing_account: Option<String>,
     /// 成本链路配置（`[cost]`）。没写就用默认值。
     #[serde(default)]
     pub cost: CostConfig,
-    pub credential: CredentialRefs,
-    /// 仅测试/联调用：把四个 API 的 host 全部指向同一个 base URL。
+    /// 凭据引用表：键名由各厂商自己定义（腾讯云是 `secret_id`/`secret_key`，
+    /// AWS 是 `access_key_id`/`secret_access_key`/`session_token`），
+    /// core 只提供「从哪读」与脱敏，不认识具体键名。
+    #[serde(default)]
+    pub credential: CredentialTable,
+    /// 厂商专属参数（`[vendor_options]`）。
+    ///
+    /// core 不解析里面的字段：保持成 TOML 表，由对应厂商的 crate 用
+    /// `deny_unknown_fields` 强类型解析——这样新增一家云不需要改 core。
+    #[serde(default)]
+    pub vendor_options: toml::Table,
+    /// 仅测试/联调用：把云 API 的 host 全部指向同一个 base URL。
     #[serde(default)]
     pub endpoint_override: Option<String>,
 }
@@ -678,11 +691,85 @@ fn yes() -> bool {
     true
 }
 
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct CredentialRefs {
-    pub secret_id: SecretRef,
-    pub secret_key: SecretRef,
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(transparent)]
+pub struct CredentialTable(BTreeMap<String, SecretRef>);
+
+impl CredentialTable {
+    /// 取一个凭据值。读到的值由调用方注册进全局脱敏器。
+    pub fn get(&self, name: &str) -> Result<SecretString, ConfigError> {
+        let reference = self.0.get(name).ok_or_else(|| {
+            ConfigError::new(format!(
+                "[credential] 缺少 `{name}`（写 `{name} = {{ env = \"SEC_...\" }}` 或 0600 file 形式）"
+            ))
+        })?;
+        reference.load()
+    }
+
+    /// 可选凭据（例如 AWS 的 `session_token`）：没配就是 `None`。
+    pub fn get_optional(&self, name: &str) -> Result<Option<SecretString>, ConfigError> {
+        match self.0.get(name) {
+            Some(reference) => Ok(Some(reference.load()?)),
+            None => Ok(None),
+        }
+    }
+
+    /// 按名字读一个凭据（`diagnose` 用：逐个读并注册到脱敏器）。
+    pub fn load(&self, name: &str) -> Result<SecretString, ConfigError> {
+        self.get(name)
+    }
+
+    /// 拒绝本厂商不认识的凭据键。写错键名（如 `secretkey`）如果不报错，
+    /// 真正的凭据就会没读到，而签名失败往往要等运行时才暴露。
+    pub fn expect_only(&self, allowed: &[&str]) -> Result<(), ConfigError> {
+        for key in self.0.keys() {
+            if !allowed.contains(&key.as_str()) {
+                return Err(ConfigError::new(format!(
+                    "[credential] 里有未知的键 `{key}`；该厂商只认 {allowed:?}"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        if self.0.is_empty() {
+            return Err(ConfigError::new(
+                "[credential] 不能为空：至少要给出凭据引用（env 或 0600 file）",
+            ));
+        }
+        for (name, reference) in &self.0 {
+            reference
+                .validate()
+                .map_err(|err| ConfigError::new(format!("[credential].{name}: {}", err.message)))?;
+        }
+        Ok(())
+    }
+
+    /// 供 `dry-run` / `diagnose` 输出：只说「从哪读、在不在」，不输出值。
+    pub fn describe(&self) -> serde_json::Value {
+        let mut out = serde_json::Map::new();
+        for (name, reference) in &self.0 {
+            out.insert(name.clone(), reference.describe());
+        }
+        serde_json::Value::Object(out)
+    }
+
+    pub fn names(&self) -> impl Iterator<Item = &str> {
+        self.0.keys().map(String::as_str)
+    }
+}
+
+/// 把 `[vendor_options]` 解析成厂商自己的强类型配置。
+///
+/// `T` 应当带 `deny_unknown_fields`：写错键名就在启动时报错，而不是静默忽略。
+pub fn parse_vendor_options<T: serde::de::DeserializeOwned>(
+    cfg: &SourceConfig,
+) -> Result<T, ConfigError> {
+    let table = toml::Value::Table(cfg.vendor_options.clone());
+    table
+        .try_into::<T>()
+        .map_err(|err| ConfigError::new(format!("[vendor_options] 不可用: {err}")))
 }
 
 impl SourceConfig {
@@ -717,14 +804,12 @@ impl SourceConfig {
                 "regions 是空列表；要自动解析请写 regions = \"auto\"",
             ));
         }
-        self.credential.secret_id.validate()?;
-        self.credential.secret_key.validate()?;
+        self.credential.validate()?;
         Ok(())
     }
 
     pub fn vendor(&self) -> Vendor {
-        // P0 只有腾讯云；其他厂商出现在配置里要立刻失败，不能静默按腾讯云跑。
-        Vendor::TencentCloud
+        self.vendor
     }
 
     pub fn scope(&self, regions: Vec<String>) -> Scope {
@@ -850,6 +935,7 @@ allow_plaintext = true
         let auto = r#"
 source_code = "tencent-cloud-prod"
 tenant_id = "tenant-example"
+vendor = "tencent"
 regions = "auto"
 
 [credential]
@@ -857,6 +943,7 @@ secret_id = { env = "SEC_TENCENT_SECRET_ID" }
 secret_key = { env = "SEC_TENCENT_SECRET_KEY" }
 "#;
         let cfg = SourceConfig::parse(auto).expect("auto 地域应可解析");
+        assert_eq!(cfg.vendor(), Vendor::TencentCloud, "小写别名应可识别");
         assert_eq!(cfg.regions, RegionsSpec::Auto(AutoRegions::Auto));
         assert_eq!(cfg.group, "inventory");
         assert_eq!(cfg.env_ref, "prod");
@@ -870,10 +957,103 @@ secret_key = { env = "SEC_TENCENT_SECRET_KEY" }
     }
 
     #[test]
+    fn vendor_is_required_and_unknown_vendors_are_rejected() {
+        let missing = r#"
+source_code = "s"
+tenant_id = "t"
+
+[credential]
+secret_id = { env = "A" }
+secret_key = { env = "B" }
+"#;
+        let err = SourceConfig::parse(missing).unwrap_err();
+        assert!(err.message.contains("vendor"), "{}", err.message);
+
+        let unknown = missing.replace(
+            "tenant_id = \"t\"",
+            "tenant_id = \"t\"\nvendor = \"oracle\"",
+        );
+        assert!(SourceConfig::parse(&unknown).is_err());
+    }
+
+    #[test]
+    fn credential_table_is_vendor_shaped() {
+        // 键名不是 core 的事情：AWS 写自己的三件套也能被解析。
+        let raw = r#"
+source_code = "aws-prod"
+tenant_id = "t"
+vendor = "AWS"
+
+[credential]
+access_key_id = { env = "SEC_AWS_AK" }
+secret_access_key = { env = "SEC_AWS_SK" }
+"#;
+        let cfg = SourceConfig::parse(raw).unwrap();
+        assert_eq!(cfg.vendor(), Vendor::Aws);
+        assert_eq!(
+            cfg.credential.names().collect::<Vec<_>>(),
+            vec!["access_key_id", "secret_access_key"]
+        );
+        assert_eq!(
+            cfg.credential.describe()["access_key_id"]["source"],
+            serde_json::json!("env")
+        );
+    }
+
+    #[test]
+    fn legacy_billing_account_uin_still_parses() {
+        // 旧配置里的 `billing_account_uin` 仍然有效（契约字段名在成本侧没变）。
+        let raw = r#"
+source_code = "tencent-cloud-prod"
+tenant_id = "t"
+vendor = "TENCENT_CLOUD"
+billing_account_uin = "100041355715"
+
+[credential]
+secret_id = { env = "A" }
+secret_key = { env = "B" }
+"#;
+        let cfg = SourceConfig::parse(raw).unwrap();
+        assert_eq!(cfg.billing_account.as_deref(), Some("100041355715"));
+    }
+
+    #[test]
+    fn vendor_options_are_parsed_by_the_vendor_crate() {
+        #[derive(Debug, Default, serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Options {
+            #[serde(default)]
+            partition: String,
+        }
+
+        let raw = r#"
+source_code = "aws-prod"
+tenant_id = "t"
+vendor = "AWS"
+
+[credential]
+access_key_id = { env = "A" }
+secret_access_key = { env = "B" }
+
+[vendor_options]
+partition = "aws-cn"
+"#;
+        let cfg = SourceConfig::parse(raw).unwrap();
+        let options: Options = parse_vendor_options(&cfg).unwrap();
+        assert_eq!(options.partition, "aws-cn");
+
+        let bad = raw.replace("partition", "partiton");
+        let cfg = SourceConfig::parse(&bad).unwrap();
+        let err = parse_vendor_options::<Options>(&cfg).unwrap_err();
+        assert!(err.message.contains("partiton"), "{}", err.message);
+    }
+
+    #[test]
     fn empty_explicit_regions_is_rejected() {
         let raw = r#"
 source_code = "s"
 tenant_id = "t"
+vendor = "TENCENT_CLOUD"
 regions = []
 
 [credential]
