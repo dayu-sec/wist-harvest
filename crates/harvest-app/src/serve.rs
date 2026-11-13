@@ -24,6 +24,8 @@ pub use crate::round::RoundOutcome;
 
 #[derive(Debug, Clone)]
 pub struct ServeOptions {
+    /// 采集开关：`false` 时保持常驻但不调度（管理面关采集时容器不必销毁）。
+    pub enabled: bool,
     pub scheduler: SchedulerConfig,
     /// 是否续跑未完成的 spool。
     pub resume: bool,
@@ -36,6 +38,7 @@ pub struct ServeOptions {
 impl Default for ServeOptions {
     fn default() -> Self {
         Self {
+            enabled: true,
             scheduler: SchedulerConfig::default(),
             resume: true,
             shutdown_grace: Duration::from_secs(30),
@@ -103,6 +106,15 @@ where
     Fut: std::future::Future<Output = RoundOutcome> + Send + 'static,
     S: std::future::Future<Output = ()>,
 {
+    // 关闭态：常驻等退出信号，一轮都不跑。**不退出进程** —— 容器留着，
+    // 管理面把 enabled 改回 true 并重启即可恢复，不用重新部署。
+    if !opts.enabled {
+        redact::info("采集已关闭（service.enabled=false）：保持常驻、不调度");
+        tokio::pin!(shutdown);
+        shutdown.as_mut().await;
+        return ServeStats::default();
+    }
+
     let mut seed: u64 = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|elapsed| elapsed.subsec_nanos() as u64)

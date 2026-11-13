@@ -171,7 +171,18 @@ fn main() {
                     None => Duration::from_secs(30),
                 };
 
+                // `enabled` 是运行时开关（管理面关采集时进程常驻但不调度）。
+                // 这里单独读一次配置：读不出来要在启动期就明确失败，而不是等到第一轮。
+                let enabled = match harvest_core::config::ServiceConfig::load(&config) {
+                    Ok(service) => service.service.enabled,
+                    Err(err) => {
+                        eprintln!("采集配置不可用：{err}");
+                        return 3;
+                    }
+                };
+
                 let opts = harvest_app::serve::ServeOptions {
+                    enabled,
                     scheduler,
                     resume: !fresh,
                     shutdown_grace: grace,

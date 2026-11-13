@@ -55,6 +55,9 @@ pub fn run(config_path: &Path, source_path: &Path) -> i32 {
 
     let out = json!({
         "service": {
+            // 运行时开关：`false` 时 `run` 常驻但不调度 —— dry-run 是「将要发生什么」的自述，
+            // 不把开关状态说出来的话，运维会以为一切照常。
+            "enabled": svc.service.enabled,
             "spool_dir": svc.service.spool_dir.display().to_string(),
             "state_dir": svc.service.state_dir.display().to_string(),
             "page_size": svc.service.page_size,

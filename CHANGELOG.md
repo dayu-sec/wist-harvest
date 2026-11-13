@@ -3,6 +3,21 @@
 本文件记录 `wist-harvest` 的所有重要变更。格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.3.0-alpha] - 2026-11-13
+
+**新增运行时开关 `[service] enabled`（默认 true）。**
+
+「装不装」和「开不开」分开：容器常驻，采集是否调度由配置里的 `enabled` 决定。管理面关掉
+采集时不必销毁容器、也不必重新部署 —— 改配置后重启即恢复。
+
+- `enabled = false`：进程保持常驻、**不调度**（连 `--now` 也不跑），等退出信号；
+- `diagnose`（healthcheck）在关闭态**只探活**，不再检查数据源 / 凭据 / 落点 ——
+  关掉采集的站点本来就没有凭据，否则容器会以 unhealthy 无限重启；
+- 默认 `true`：老配置文件没有这个键时行为不变。
+
+**回退注意**：`[service]` 是 `deny_unknown_fields`，0.2.0 的二进制读到 `enabled` 会直接
+解析失败。回退镜像时要同时回退渲染出来的 `harvest.toml`（或删掉这一行）。
+
 ## [0.2.0-alpha] - 2026-11-13
 
 **采集器不再认识客户 / 租户。**
@@ -17,7 +32,7 @@
 - **`sources.d/<source_code>.toml` 里的 `tenant_id` 删掉**。`deny_unknown_fields` 下留着它
   会直接解析失败；启用判据改由栈侧的 `HARVEST_ENABLED` 决定（不再拿「租户非空」当开关）。
 - **spool 目录**：`<spool>/<tenant>/<producer>/<snap_id>/` → `<spool>/<producer>/<snap_id>/`；
-  租约文件同理去掉租户段。旧运行态目录不再被复用（清掉 `harvest-run/{spool,state}` 即可）。
+  租约文件同理去掉租户段。
 - **快照体少一个 `tenant_id`**（`wist.harvest.snapshot.v1` 内容变化）：数据面的 WPL/OML 与
   atlas 的 inventory 适配器都**不读**它，故无消费方受影响。
 - **成本产物**：`cost/{tenant}/{vendor}/…` → `cost/{vendor}/…`，manifest 的 `range` 少一个

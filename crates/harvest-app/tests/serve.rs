@@ -42,6 +42,7 @@ async fn skips_trigger_while_previous_round_is_running() {
 
     let stats = serve(
         ServeOptions {
+            enabled: true,
             scheduler: interval_scheduler(
                 Duration::from_millis(20),
                 0,
@@ -85,6 +86,7 @@ async fn failures_are_retried_with_backoff_within_one_cycle() {
 
     let stats = serve(
         ServeOptions {
+            enabled: true,
             // 定点很远（60s），所以这一轮只会被失败重试驱动。
             scheduler: interval_scheduler(
                 Duration::from_secs(60),
@@ -128,6 +130,7 @@ async fn success_stops_the_retry_chain() {
 
     let stats = serve(
         ServeOptions {
+            enabled: true,
             scheduler: interval_scheduler(
                 Duration::from_secs(60),
                 5,
@@ -169,6 +172,7 @@ async fn shutdown_cancels_the_inflight_round() {
 
     let stats = serve(
         ServeOptions {
+            enabled: true,
             scheduler: interval_scheduler(
                 Duration::from_secs(60),
                 0,
@@ -214,6 +218,7 @@ async fn no_round_started_when_shutdown_arrives_before_the_trigger() {
 
     let stats = serve(
         ServeOptions {
+            enabled: true,
             scheduler: interval_scheduler(
                 Duration::from_secs(3600),
                 3,
@@ -239,4 +244,42 @@ async fn no_round_started_when_shutdown_arrives_before_the_trigger() {
 
     assert_eq!(stats.started, 0, "还没到点就退出，不应开轮");
     assert_eq!(started.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn disabled_service_stays_idle_and_runs_no_round() {
+    // 关闭态：进程常驻等退出信号，**一轮都不跑**（管理面关采集时容器不必销毁）。
+    let rounds = Arc::new(AtomicBool::new(false));
+    let rounds_round = Arc::clone(&rounds);
+
+    let stats = serve(
+        ServeOptions {
+            enabled: false,
+            scheduler: interval_scheduler(
+                Duration::from_millis(20),
+                0,
+                Duration::from_millis(10),
+                Duration::from_millis(20),
+            ),
+            resume: true,
+            shutdown_grace: Duration::from_millis(50),
+            run_immediately: true,
+        },
+        async { tokio::time::sleep(Duration::from_millis(120)).await },
+        move |_cancel| {
+            let rounds = Arc::clone(&rounds_round);
+            async move {
+                rounds.store(true, Ordering::SeqCst);
+                RoundOutcome::Done
+            }
+        },
+    )
+    .await;
+
+    assert!(
+        !rounds.load(Ordering::SeqCst),
+        "关闭态不应跑任何一轮（连 run_immediately 也不跑）"
+    );
+    assert_eq!(stats.started, 0);
+    assert_eq!(stats.succeeded, 0);
 }

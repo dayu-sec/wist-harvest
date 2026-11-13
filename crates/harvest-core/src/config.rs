@@ -268,6 +268,10 @@ pub struct ServiceConfig {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ServiceSettings {
+    /// 采集开关（运行时）。`false` = 进程保持常驻但**不调度**：管理面关掉采集时容器不必销毁，
+    /// 改回 `true` 后重启即恢复。默认 `true`（配置里没写就是开着的）。
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
     #[serde(default = "default_spool_dir")]
     pub spool_dir: PathBuf,
     #[serde(default = "default_state_dir")]
@@ -301,6 +305,7 @@ pub struct ServiceSettings {
 impl Default for ServiceSettings {
     fn default() -> Self {
         Self {
+            enabled: default_enabled(),
             spool_dir: default_spool_dir(),
             state_dir: default_state_dir(),
             page_size: default_page_size(),
@@ -353,6 +358,10 @@ impl AllowEmpty {
             Self::Types(list) => serde_json::json!(list),
         }
     }
+}
+
+fn default_enabled() -> bool {
+    true
 }
 
 fn default_spool_dir() -> PathBuf {
@@ -1095,6 +1104,16 @@ secret_key = { env = "B" }
         assert!(parse_flat_map("a:\n  b: c\n").is_err(), "嵌套结构应报错");
         assert!(parse_flat_map("a: 1\n  b: 2\n").is_err(), "缩进应报错");
         assert!(parse_flat_map("[1,2]").is_err(), "JSON 数组应报错");
+    }
+
+    #[test]
+    fn service_enabled_defaults_to_true_and_can_be_turned_off() {
+        // 没写就是开着（现场升级不会因为少一个键就停采）。
+        let default = ServiceConfig::parse("").unwrap();
+        assert!(default.service.enabled);
+
+        let off = ServiceConfig::parse("[service]\nenabled = false\n").unwrap();
+        assert!(!off.service.enabled);
     }
 
     #[test]

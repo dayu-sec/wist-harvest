@@ -112,6 +112,25 @@ pub fn diagnose(config_path: &Path, source_path: &Path) -> DiagnoseReport {
         }
     };
 
+    // 关闭态：healthcheck 只探活 + **落点目录仍要可用**，不检查数据源 / 凭据 / 采集计划 ——
+    // 关掉采集的站点本来就没有凭据，检查它会让容器以 unhealthy 无限重启；
+    // 但 spool/state 是「现在没事、开启就炸」的那类问题，必须在关闭态也报出来。
+    if let Some(service) = &service
+        && !service.service.enabled
+    {
+        checks.push(Check {
+            name: "service_enabled",
+            ok: true,
+            detail: json!({
+                "enabled": false,
+                "note": "采集已关闭（service.enabled=false）：只探活与落点目录，不检查数据源 / 凭据 / 采集计划",
+            }),
+        });
+        checks.push(check_dir("spool_dir", &service.service.spool_dir));
+        checks.push(check_dir("state_dir", &service.service.state_dir));
+        return DiagnoseReport { checks };
+    }
+
     let source = match SourceConfig::load(source_path) {
         Ok(source) => {
             checks.push(Check {
@@ -316,4 +335,85 @@ pub fn run(config_path: &Path, source_path: &Path, quiet: bool) -> i32 {
         serde_json::to_string_pretty(&report.to_json(quiet)).unwrap_or_default()
     );
     report.exit_code()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn disabled_service_probes_aliveness_and_dirs_only() {
+        // 关闭态：healthcheck 必须过 —— 关掉采集的站点本来就没有凭据，
+        // 否则容器会以 unhealthy 无限重启（这是「常驻 + 运行时开关」的前提）。
+        let dir = tempfile::tempdir().unwrap();
+        let spool = dir.path().join("spool");
+        let state = dir.path().join("state");
+        std::fs::create_dir_all(&spool).unwrap();
+        std::fs::create_dir_all(&state).unwrap();
+        let config = dir.path().join("harvest.toml");
+        std::fs::write(
+            &config,
+            format!(
+                "[service]\nenabled = false\nspool_dir = {:?}\nstate_dir = {:?}\n",
+                spool, state
+            ),
+        )
+        .unwrap();
+        let source = dir.path().join("does-not-exist.toml");
+
+        let report = diagnose(&config, &source);
+        assert!(report.ok(), "{}", report.to_json(false));
+        assert!(
+            report
+                .checks
+                .iter()
+                .any(|check| check.name == "service_enabled")
+        );
+        // 关闭态不读数据源
+        assert!(
+            !report
+                .checks
+                .iter()
+                .any(|check| check.name == "source_config")
+        );
+    }
+
+    #[test]
+    fn disabled_service_still_probes_the_spool_and_state_dirs() {
+        // 关闭态也要检查落点：`check_dir` 的语义是「能建出来并且写得进去」
+        // （盘没挂上 / 只读挂载会在这里红），所以断言「检查发生了 + 目录真的被建了」。
+        let dir = tempfile::tempdir().unwrap();
+        let spool = dir.path().join("spool");
+        let state = dir.path().join("state");
+        let config = dir.path().join("harvest.toml");
+        std::fs::write(
+            &config,
+            format!(
+                "[service]\nenabled = false\nspool_dir = {:?}\nstate_dir = {:?}\n",
+                spool, state
+            ),
+        )
+        .unwrap();
+        let source = dir.path().join("does-not-exist.toml");
+
+        let report = diagnose(&config, &source);
+        assert!(
+            report.checks.iter().any(|check| check.name == "spool_dir"),
+            "{}",
+            report.to_json(false)
+        );
+        assert!(report.checks.iter().any(|check| check.name == "state_dir"));
+        assert!(spool.is_dir() && state.is_dir(), "落点目录应被检查时建出来");
+    }
+
+    #[test]
+    fn enabled_service_still_requires_a_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("harvest.toml");
+        std::fs::write(&config, "[service]\nenabled = true\n").unwrap();
+        let source = dir.path().join("does-not-exist.toml");
+
+        let report = diagnose(&config, &source);
+        assert!(!report.ok(), "开着采集时数据源读不到必须报失败");
+    }
 }
