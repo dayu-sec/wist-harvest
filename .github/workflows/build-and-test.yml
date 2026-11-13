@@ -78,9 +78,8 @@ jobs:
           flags: unittests
           name: coverage-${{ github.ref_name }}
           token: ${{ secrets.CODECOV_TOKEN }}
-          # 与 gateway 的差别：gateway 在 push 时把上传失败当构建失败，那是因为它那边
-          # CODECOV_TOKEN 早已配好。新仓在 token 配上之前，一处「上传 401」不该把整条
-          # 构建染红（覆盖率没传上去 ≠ 代码错了）。配上 token 后可以把这里改回
-          # `${{ github.event_name == 'push' }}`。
+          # CODECOV_TOKEN 是**组织级** Secret（本仓直接继承），gateway 那边早已配好。
+          # 本仓第一次跑时若组织侧还没把它作用到本仓，上传会 401 —— 那不该把整条构建染红
+          #（覆盖率没传上去 ≠ 代码错了）。确认可传后改回 `${{ github.event_name == 'push' }}`。
           fail_ci_if_error: false
           verbose: true

@@ -101,9 +101,11 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       # 国内镜像源（腾讯云 TCR）：国内服务器拉 ghcr.io 很慢，客户端改用 TCR 地址。
-      # 凭据在 TCR 控制台生成（访问凭证），存 GitHub Secrets：TCR_USERNAME / TCR_PASSWORD。
-      # `TCR_HOST` 是个 **variable**（不是 secret）：换中转地域（如香港实例）只改这一个值，
-      # 不配时回落到现有境内实例，行为与以前一致。
+      # 凭据在 TCR 控制台生成（访问凭证），存 **组织级** Secrets（dayu-sec）：
+      # TCR_USERNAME / TCR_PASSWORD —— 本仓直接继承，**不需要在这个仓里再建一遍**。
+      # 唯一要确认的：组织侧若把它们限定为 selected repositories，把本仓加进那个列表。
+      # `TCR_HOST` 是个 **variable**（不是 secret）：换中转地域（如香港实例）只改这一个值；
+      # 未定义（或本仓不在它的作用域里）时自动回落境内实例，行为与以前一致。
       - name: Login to TCR
         uses: docker/login-action@v3
         with:
@@ -154,6 +156,8 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Login to TCR
+        # 同上：TCR_USERNAME / TCR_PASSWORD 是**组织级** Secrets，TCR_HOST 是组织级 Variable，
+        # 本仓直接继承，不需要在这里再建一遍。
         uses: docker/login-action@v3
         with:
           registry: ${{ vars.TCR_HOST || 'dy-sec.tencentcloudcr.com' }}
@@ -212,6 +216,7 @@ jobs:
   # 未配置 Variables（COS_BUCKET 为空）时整段自动跳过，不会让发布失败；
   # 一旦设置 COS_BUCKET 即视为启用，此时密钥缺失会直接报错（便于发现漏配）。
   # 注意：`secrets` 上下文不能出现在 step 级 if 里，故启用判定放在 job 级（只看 vars）。
+  # 这些也是**组织级**配置（与其它仓同一套名字），本仓不需要单独建：
   #   Variables：COS_BUCKET（含 -APPID）、COS_REGION（如 ap-guangzhou）、可选 COS_PREFIX（默认取仓库名）
   #   Secrets：  COS_SECRET_ID、COS_SECRET_KEY（临时密钥再加 COS_SESSION_TOKEN）
   # 对象键：<COS_PREFIX>/<tag>/<文件名> 与 <COS_PREFIX>/latest/<文件名>
