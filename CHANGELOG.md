@@ -1,35 +1,20 @@
 # Changelog
 
-## 0.1.0-alpha — 2026-11-13
+本文件记录 `wist-harvest` 的所有重要变更。格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
+版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
-首个**实际发布**的版本（`v0.1.0-alpha`）。骨架写完时只打了 CHANGELOG 标题、没打 tag，
-所以下面这些内容一次进这一个版本：多云（腾讯云 + AWS）、成本链路、
-正确性修复，以及 CI/运行镜像。
+## [0.1.0-alpha] - 2026-11-13
 
-### 交付（CI 与运行镜像）
+首个实际发布的版本。骨架写完时只写了 changelog 标题、没打 tag，所以这一次把骨架、
+多云（腾讯云 + AWS）、成本链路与正确性修复一并发布。
 
-- **补上发布流水线**（骨架取自 `wist-gateway`，只改产物名；三处有意偏离见下）：
-  - `.github/workflows/build-and-test.yml`：`cargo fmt --all --check` → `clippy -D warnings`
-    → `build --release --locked` → `test --release --locked`（ubuntu-24.04 + macos-15），
-    另起 coverage job 传 Codecov；
-  - `.github/workflows/release.yml`：推 `v*.*.*` tag 时按平台**原生**编译两个 linux 目标
-    （amd64/arm64）→ tarball；按架构各推一个单平台镜像（ghcr + 腾讯云 TCR）→
-    **先冒烟跑一次镜像**（`--version` + 缺配置时 `diagnose` 必须非 0）→ 合并 manifest；
-    发 GitHub Release；可选推 COS（带 `x-cos-meta-artifact-sha256`）；
-  - `.github/dependabot.yml`（cargo + github-actions）。
-- **不出 macOS 产物**：本仓发出去的形态是镜像，macOS 那份只服务「开发机跑一次」，
-  `cargo run` 已足够，不值 `macos-15` 的 10 倍分钟数。
-- **新增 `docker/Dockerfile`**：`distroless/cc-debian13` + 预编译二进制，**整个文件没有一个 `RUN`**
-  （否则 arm64 那侧要在 QEMU 下跑 apt-get）。与 gateway 的差别只有三处，都是为了「采集器」：
-  运行身份 **10001:10001**（与 `wist-field-stack` 的 compose 同值）、
-  **不 EXPOSE**（没有入站面）、**不内置 HEALTHCHECK**（`diagnose` 必须带栈给的 `--config`/`--source`）。
-- 与 gateway 的三处有意偏离：
-  · 没有跨仓检出（用例全用仓内 fixture，拉别仓只会被别仓的分支染红）；
-  · 多了 `clippy -D warnings`（本仓 README 自己声明的门禁，gateway 的 CI 没跑，
-    结果是「CI 绿、本地门禁红」）；只跑 ubuntu，避免 lint 集合跟着工具链版本双倍噪声；
-  · `--locked` 与 release 的编译命令一致（锁文件漂移在 CI 就红，而不是推 tag 才发现）。
-- Codecov 上传失败不阻断构建（组织级 `CODECOV_TOKEN` 尚未作用到本仓时，
-  上传 401 不该把整条构建染红）；确认可传后改回 push 时阻断。
+### 制品
+
+- 首个可部署制品：容器镜像 `ghcr.io/dayu-sec/wist-harvest`（国内镜像源
+  `dy-sec.tencentcloudcr.com/cloud/wist-harvest`，linux amd64 / arm64），
+  以及同 tag 的二进制 tarball（GitHub Release）。
+- 镜像以 **10001:10001** 运行（与 `wist-field-stack` 同身份）、**不开任何入站端口**、
+  不带 shell；健康检查用 `wist-harvest diagnose`（离线、不输出凭据），由栈的编排定义。
 
 ### 多云（P0 解耦 + P1 第二家云）
 
@@ -83,7 +68,6 @@
 - 启动失败的报告改用 `start-<ts>.json`，不再反复覆盖同一份 `-.json`。
 - 修正文档漂移：帧格式（ASCII 十进制长度）、`--account` 不存在的描述、
   `Interval` 语义、WPL 的 `chars:body`（无 NUL）。
-- 修掉 clippy `-D warnings` 的测试代码告警，门禁恢复绿色。
 
 ### 运行（`run` / `diagnose`）
 
@@ -92,8 +76,7 @@
   失败按指数退避重试且**不推迟下一次定点**；SIGTERM/SIGINT 优雅退出（退出码 0）。
 - `diagnose` 改为容器 healthcheck 语义：离线、非交互、分项结果，新增 `--quiet`；
   数据平面端点只校验形态不做拨号。凭据只报来源，输出前统一脱敏。
-- `harvest-app` 拆出 lib，四个子命令的逻辑都可在集成测试里直接断言。
-- 抓取轮次支持取消（`RunOptions.cancel`）：信号到达时在工作项边界中止，保持零帧。
+- 抓取轮次支持取消：信号到达时在工作项边界中止，保持零帧。
 
 ### 骨架（P0，首版里一并带上）
 
