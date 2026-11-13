@@ -152,6 +152,23 @@ macOS 那一份唯一的用处是「开发机上对着真实云账号跑一次�
 - **不内置 HEALTHCHECK**：`diagnose` 必须带 `--config` / `--source`，路径由栈挂载决定，
   健康检查写在栈的 compose 里。
 
+### 分支与发布通道
+
+本仓是**制品**（独立运行的程序 + 镜像，不被别的代码依赖），按三档成熟度推进
+（与 `wist-gateway` 同一套；gateway 同样是“直接部署的服务”）：
+
+| 成熟度 | 分支 | 标签 | gx |
+| --- | --- | --- | --- |
+| 最低 | `alpha` | `vX.Y.Z-alpha` | `gx adm tag_alpha` |
+| 中间 | `beta` | `vX.Y.Z-beta` | `gx adm tag_beta` |
+| 最高 | `main` | `vX.Y.Z` | `gx adm tag_stable` |
+
+- **日常开发在 `alpha`**。`main` 目前停在 `v0.1.0-alpha` 之前的基线（还没有稳定版）；
+  `beta` 在第一次 `alpha → beta` 推进时再切 —— 提前建一个空通道没有意义。
+- **标签只在对应分支上打**：`tag_alpha` 在 `alpha`，`tag_stable` 在 `main`。
+  在错的分支上打的标签，成熟度与分支对不上，回滚时会找不到该退回哪条线。
+- 已发布版本出问题：从对应线切 `hotfix/x.y` 修，修完回到同一条通道。
+
 ## 用法
 
 ```bash
