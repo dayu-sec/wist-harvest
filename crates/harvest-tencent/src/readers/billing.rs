@@ -38,8 +38,8 @@ pub struct BillFetchStat {
     pub rows: u64,
     pub pages: u64,
     pub retries: u64,
-    /// 落到范围外被丢掉的明细（按日范围取整月数据时正常存在）。
-    pub out_of_range: u64,
+    /// 云 API `RequestId`（写入 manifest 供排障，不含凭据）。
+    pub request_ids: Vec<String>,
 }
 
 /// 抓一个范围的所有明细，逐行回调（有界内存）。
@@ -58,7 +58,6 @@ where
     let mut stat = BillFetchStat::default();
     let mut offset: u64 = 0;
     let mut total: Option<u64> = None;
-    let mut request_ids: Vec<String> = Vec::new();
 
     loop {
         let body = json!({
@@ -73,7 +72,7 @@ where
         let outcome = client.call(&DESCRIBE_BILL_DETAIL, None, &body).await?;
         stat.retries += u64::from(outcome.retries);
         if let Some(id) = request_id(&outcome.body) {
-            request_ids.push(id);
+            stat.request_ids.push(id);
         }
 
         let page_total = outcome
@@ -211,11 +210,11 @@ pub fn map_detail(
         let Some(component) = component.as_object() else {
             continue;
         };
-        real.add(opt(component, "RealCost").as_deref());
-        cash.add(opt(component, "CashPayAmount").as_deref());
-        voucher.add(opt(component, "VoucherPayAmount").as_deref());
-        incentive.add(opt(component, "IncentivePayAmount").as_deref());
-        transfer.add(opt(component, "TransferPayAmount").as_deref());
+        real.add(opt(component, "RealCost").as_deref())?;
+        cash.add(opt(component, "CashPayAmount").as_deref())?;
+        voucher.add(opt(component, "VoucherPayAmount").as_deref())?;
+        incentive.add(opt(component, "IncentivePayAmount").as_deref())?;
+        transfer.add(opt(component, "TransferPayAmount").as_deref())?;
         if currency_from_row.is_empty() {
             currency_from_row = as_str(component.get("Currency"));
         }
@@ -431,6 +430,20 @@ mod tests {
             detail.resource_key, "p_tcr:UNALLOCATED",
             "未归集费用必须有稳定键，否则下游无处可挂"
         );
+    }
+
+    #[test]
+    fn an_unparseable_component_amount_fails_the_row() {
+        // 金额读不出来必须报错；静默归零会把「未知」写成「确认为零」。
+        let mut bad = row();
+        bad.get_mut("ComponentSet").unwrap().as_array_mut().unwrap()[0]["RealCost"] = json!("1e5");
+        let err = map_detail(
+            &bad,
+            &range(CostBasis::Charge, (2026, 10, 1), (2026, 10, 31)),
+            "CNY",
+        )
+        .expect_err("金额解析失败不能静默");
+        assert!(format!("{err}").contains("十进制"), "实际：{err}");
     }
 
     #[test]

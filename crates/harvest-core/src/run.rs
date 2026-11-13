@@ -134,7 +134,16 @@ where
 
     let finished = crate::time::utc_now();
     let report = build_report(scope, &trace, started, finished, abort.as_ref());
-    let report_path = match report.write(&svc.runs_dir()) {
+    // 还没建 spool 就失败时没有 snap_id，用启动时间当文件名：不能让一次次的
+    // 启动失败覆盖同一份 `-.json`，否则重启风暴会把排障记录冲干净。
+    let report_name = match trace.spool.as_ref() {
+        Some(_) => None,
+        None => Some(format!("start-{}", crate::time::snap_timestamp(started))),
+    };
+    let report_path = match match &report_name {
+        Some(name) => report.write_as(&svc.runs_dir(), name),
+        None => report.write(&svc.runs_dir()),
+    } {
         Ok(path) => Some(path),
         Err(err) => {
             crate::redact::error(format!("写入运行报告失败: {err}"));
@@ -179,29 +188,66 @@ where
         ));
     }
 
-    let snap_id = match &opts.snap_id {
+    let base_snap_id = match &opts.snap_id {
         Some(id) => id.clone(),
-        None => Spool::next_available_snap_id(
-            &svc.service.spool_dir,
-            scope,
-            &scope.new_snap_id(crate::time::utc_now()),
-        ),
+        None => scope.new_snap_id(crate::time::utc_now()),
     };
 
-    let mut spool = match if opts.resume {
+    let resumable = if opts.resume {
         Spool::find_resumable(&svc.service.spool_dir, scope)?
     } else {
         None
-    } {
-        Some(dir) => {
-            crate::redact::info(format!("续跑既有 spool: {}", dir.display()));
-            trace.resumed = true;
-            Spool::open_existing(&dir)?
-        }
-        None => Spool::create(&svc.service.spool_dir, scope, &snap_id, &plan)?,
     };
 
-    ensure_plan_matches(&spool, &plan)?;
+    let mut spool = match resumable {
+        Some(dir) => {
+            let mut existing = Spool::open_existing(&dir)?;
+            // 两种“不能再续”的情况：计划变了（永远不可能变合法），或者放得太久了
+            // （永久性的局部失败会把一份旧 spool 无限期地续下去，永不产出新快照）。
+            let stale_reason = existing
+                .plan_mismatch(&plan)
+                .map(|(expected, actual)| {
+                    format!(
+                        "采集计划与 spool 不一致，放弃续跑（计划 {:?} vs spool {:?}）",
+                        expected, actual
+                    )
+                })
+                .or_else(|| {
+                    existing
+                        .resume_expired(svc.service.max_resume_age_ms)
+                        .then(|| {
+                            format!(
+                                "spool 已存在 {}ms，超过可续跑时限 {}ms",
+                                existing.age_ms(),
+                                svc.service.max_resume_age_ms
+                            )
+                        })
+                });
+
+            match stale_reason {
+                // 计划一致且未过期：正常续跑。
+                None => {
+                    crate::redact::info(format!("续跑既有 spool: {}", dir.display()));
+                    trace.resumed = true;
+                    existing
+                }
+                // 否则放弃它（保留目录供诊断），本轮开新 snap_id 重新采。
+                // 不这么做的话，采集器会每轮撞在同一份旧 spool 上、永不发布。
+                Some(reason) => {
+                    crate::redact::warn(&reason);
+                    existing.abandon(&reason)?;
+                    let snap_id =
+                        Spool::next_available_snap_id(&svc.service.spool_dir, scope, &base_snap_id);
+                    Spool::create(&svc.service.spool_dir, scope, &snap_id, &plan)?
+                }
+            }
+        }
+        None => {
+            let snap_id =
+                Spool::next_available_snap_id(&svc.service.spool_dir, scope, &base_snap_id);
+            Spool::create(&svc.service.spool_dir, scope, &snap_id, &plan)?
+        }
+    };
     crate::redact::info(format!(
         "snap_id={} 范围={} 工作项={}",
         spool.snap_id(),
@@ -228,21 +274,6 @@ where
 }
 
 /// 续跑必须保证计划没变：配置改了地域/类型就是另一个范围，不能混进同一帧。
-fn ensure_plan_matches(spool: &Spool, plan: &[WorkItem]) -> Result<(), HarvestError> {
-    let manifest = spool.manifest();
-    let mut expected: Vec<String> = plan.iter().map(WorkItem::key).collect();
-    expected.sort();
-    let mut actual: Vec<String> = manifest.items.iter().map(|r| r.item().key()).collect();
-    actual.sort();
-    if expected != actual {
-        return Err(HarvestError::integrity(format!(
-            "续跑的采集计划与 spool 不一致（计划变更需换新 snap_id）: 计划 {:?} vs spool {:?}",
-            expected, actual
-        )));
-    }
-    Ok(())
-}
-
 /// 一轮需要的不可变输入，打包成结构，避免参数列表膨胀。
 struct RoundContext<'a, S: ?Sized, K: ?Sized> {
     svc: &'a ServiceConfig,
@@ -309,10 +340,24 @@ where
     source.verify(spool.manifest())?;
     // `complete` 只能在这里置真：上面的 verify 已经挡掉了不完整的帧，
     // 能走到这一行就说明这是采集器自己校验过的完整枚举。
+    //
+    // `scope` 还要按**实际计划到的类型**再收敛一次：少采一类却声称账号级全集，
+    // 会让下游把「这次没采」当成「已经不存在」（见 `Coverage::for_planned_types`）。
+    let declared = source.coverage();
+    let planned_types = spool.manifest().planned_types();
     let coverage = Coverage {
         complete: true,
-        ..source.coverage()
-    };
+        ..declared.clone()
+    }
+    .for_planned_types(&planned_types);
+    if coverage.scope != declared.scope {
+        crate::redact::warn(format!(
+            "本帧只采了 {:?}，缺 {:?}：覆盖范围从 {:?} 降为 partial（下游只 upsert、不判死）",
+            planned_types,
+            Coverage::missing_asset_types(&planned_types),
+            declared.scope
+        ));
+    }
     let assembled = assemble::build_snapshot(spool, scope, coverage)?;
     if assembled.duplicate_eip_rows > 0 {
         crate::redact::info(format!(
@@ -325,9 +370,9 @@ where
     spool.set_state(RunState::Verified);
     spool.save()?;
 
-    // 快照正文先序列化，再包成数据面记录（JSON 头 + CLOUDINV: + 正文 + NUL）。
-    // 为什么要包：WPL 的规则是 `json(...), symbol(...), chars:body\0`，直接发裸 JSON
-    // 结构对不上，记录会掉进兜底 sink 或被拒。
+    // 快照正文先序列化，再包成数据面记录（JSON 头 + CLOUDINV: + 正文，不带 NUL）。
+    // 为什么要包：WPL 的规则是 `json(...), symbol(...), chars:body`，直接发裸 JSON
+    // 结构对不上，记录会掉进兜底 sink 或被拒；而 NUL 会被引擎一起收进 body。
     let snapshot_json = serde_json::to_vec(&assembled.snapshot)
         .map_err(|err| HarvestError::data_format(format!("快照序列化失败: {err}")))?;
     let bytes = crate::wire::warp_record(

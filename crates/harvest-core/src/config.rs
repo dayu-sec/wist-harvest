@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::model::Vendor;
+use crate::model::{AssetType, Vendor};
 use crate::scope::{GROUP_INVENTORY, Scope};
 
 // ---------------------------------------------------------------------------
@@ -206,7 +206,7 @@ fn ensure_private_mode(path: &Path) -> Result<(), ConfigError> {
     // 仍然拒绝：属组可写/可执行、以及其他任何账户可访问（如 0660 / 0644 / 0604）。
     if mode & 0o037 != 0 {
         return Err(ConfigError::new(format!(
-            "凭据文件 {} 权限是 {:o}，必须是 0600，或 0640（仅属组可读）",
+            "凭据文件 {} 权限是 {:o}，必须是 0600，或 0640（仅属组可读）；更严格（如 0400）也允许",
             path.display(),
             mode
         )));
@@ -283,9 +283,19 @@ pub struct ServiceSettings {
     /// P0 顺序采集。并发留字段，避免下一阶段改配置结构。
     #[serde(default = "default_concurrency")]
     pub concurrency: usize,
-    /// 允许"云端确实为空"时发空数组快照。默认不允许：空 ≠ 失败。
+    /// 允许「云端确实为空」时发空数组快照。默认不允许：空 ≠ 失败。
+    ///
+    /// 可以写 `false`/`true`（对全部类型生效），也可以写类型列表（只对列出的类型生效）。
     #[serde(default)]
-    pub allow_empty: bool,
+    pub allow_empty: AllowEmpty,
+    /// 可续跑 spool 的最大年龄（毫秒，默认 24h，`0` = 不限制）。
+    ///
+    /// 为什么要它：某个工作项如果是**永久性**失败（某个地域没权限、某产品在该地域不开放），
+    /// 不做限制就会每轮都续跑同一份旧 spool——永远不会产出新快照，而且续跑成功时
+    /// 帧里的 `collected_at` 还是若干天前。超过时限就把旧 spool 标记为 `Abandoned`
+    /// （保留供诊断），本轮开新 `snap_id` 重新采。
+    #[serde(default = "default_max_resume_age_ms")]
+    pub max_resume_age_ms: u64,
 }
 
 impl Default for ServiceSettings {
@@ -298,7 +308,49 @@ impl Default for ServiceSettings {
             max_response_bytes: default_max_response_bytes(),
             request_timeout_ms: default_request_timeout_ms(),
             concurrency: default_concurrency(),
-            allow_empty: false,
+            allow_empty: AllowEmpty::default(),
+            max_resume_age_ms: default_max_resume_age_ms(),
+        }
+    }
+}
+
+fn default_max_resume_age_ms() -> u64 {
+    24 * 60 * 60 * 1000
+}
+
+/// `service.allow_empty`：是否允许「云端确实为空」时发空数组快照。
+///
+/// - `false` / `true`：对全部类型生效；
+/// - `["EIP", "SUB_NET"]`：只对列出的类型生效。
+///
+/// 为什么支持按类型：全局开关会把「这一类确实为空」和「所有类型都不再受保护」绑在一起 ——
+/// 客户为了养一个空类型，得同时放弃另外三类的保护，于是「少采一类」重新变成静默事故。
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(untagged)]
+pub enum AllowEmpty {
+    All(bool),
+    Types(Vec<AssetType>),
+}
+
+impl Default for AllowEmpty {
+    fn default() -> Self {
+        Self::All(false)
+    }
+}
+
+impl AllowEmpty {
+    pub fn allows(&self, asset_type: AssetType) -> bool {
+        match self {
+            Self::All(value) => *value,
+            Self::Types(list) => list.contains(&asset_type),
+        }
+    }
+
+    /// `dry-run` 输出用。
+    pub fn describe(&self) -> serde_json::Value {
+        match self {
+            Self::All(value) => serde_json::json!(value),
+            Self::Types(list) => serde_json::json!(list),
         }
     }
 }
@@ -758,9 +810,27 @@ allow_plaintext = true
         let cfg = ServiceConfig::parse(SERVICE).expect("配置应可解析");
         assert_eq!(cfg.service.page_size, 50);
         assert_eq!(cfg.retry.max_attempts, 4);
-        assert!(!cfg.service.allow_empty);
+        assert!(!cfg.service.allow_empty.allows(AssetType::Eip));
         assert_eq!(cfg.rate.actions["DescribeInstances"].qps, 20.0);
         assert_eq!(cfg.sink.publish_attempts, 3);
+    }
+
+    #[test]
+    fn allow_empty_accepts_a_bool_or_a_type_list() {
+        let none = ServiceConfig::parse("[service]\nallow_empty = false\n").unwrap();
+        assert!(!none.service.allow_empty.allows(AssetType::Eip));
+
+        let all = ServiceConfig::parse("[service]\nallow_empty = true\n").unwrap();
+        assert!(all.service.allow_empty.allows(AssetType::Eip));
+
+        // 只给某几类开：其余三类仍然受「空 ≠ 失败」保护。
+        let some = ServiceConfig::parse("[service]\nallow_empty = [\"EIP\"]\n").unwrap();
+        assert!(some.service.allow_empty.allows(AssetType::Eip));
+        assert!(!some.service.allow_empty.allows(AssetType::Vpc));
+        assert_eq!(
+            some.service.allow_empty.describe(),
+            serde_json::json!(["EIP"])
+        );
     }
 
     #[test]

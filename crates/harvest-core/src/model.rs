@@ -500,6 +500,38 @@ impl Coverage {
             account: None,
         }
     }
+
+    /// 按**本轮实际计划到的类型**收敛 `scope`。
+    ///
+    /// `account` 的含义是「账号可见地域全集都已采到」，它成立的前提是**组内每一类都采了**。
+    /// `mode=snapshot` 的替换语义作用域不含资产类型，所以只采了部分类型却声称 `account`，
+    /// 等于告诉下游「没出现的类型已经不在了」—— 那会把用户主动关掉的类型整类误删。
+    ///
+    /// 因此这里做最后一道收敛：声明的类型集合不是全集，就把 `scope` 降为 `partial`
+    /// （下游只 upsert、不判死）。这条规则放在 core，任何 `Source` 都绕不过去。
+    pub fn for_planned_types(mut self, planned: &[AssetType]) -> Self {
+        if self.scope != CoverageScope::Account {
+            return self;
+        }
+        if !covers_every_asset_type(planned) {
+            self.scope = CoverageScope::Partial;
+        }
+        self
+    }
+
+    /// 本帧声称「整个账号」时，计划里缺了哪些类型（空 = 一类不缺）。
+    pub fn missing_asset_types(planned: &[AssetType]) -> Vec<AssetType> {
+        AssetType::ALL
+            .into_iter()
+            .filter(|asset_type| !planned.contains(asset_type))
+            .collect()
+    }
+}
+
+fn covers_every_asset_type(planned: &[AssetType]) -> bool {
+    AssetType::ALL
+        .iter()
+        .all(|asset_type| planned.contains(asset_type))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -538,6 +570,36 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&partial).unwrap(),
             serde_json::json!({ "scope": "partial", "complete": false })
+        );
+    }
+
+    #[test]
+    fn account_scope_requires_every_asset_type() {
+        let full = Coverage {
+            scope: CoverageScope::Account,
+            complete: true,
+            account: None,
+        };
+        assert_eq!(
+            full.clone().for_planned_types(&AssetType::ALL).scope,
+            CoverageScope::Account,
+            "四类齐全才允许声明账号级全集"
+        );
+
+        // 少一类就是子集：关掉 `assets.eip` 时绝不能声称 account。
+        let subset = [AssetType::CloudHost, AssetType::Vpc, AssetType::SubNet];
+        assert_eq!(
+            full.clone().for_planned_types(&subset).scope,
+            CoverageScope::Partial,
+            "缺类型必须降级为 partial，否则下游会把空数组当成『这类没了』"
+        );
+        assert_eq!(Coverage::missing_asset_types(&subset), vec![AssetType::Eip]);
+
+        // 已经是 partial 的不会被「升级」。
+        let partial = Coverage::partial();
+        assert_eq!(
+            partial.for_planned_types(&AssetType::ALL).scope,
+            CoverageScope::Partial
         );
     }
 

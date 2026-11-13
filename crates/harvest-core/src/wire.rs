@@ -7,12 +7,13 @@
 //! {"schema":..,"agent":..,"ts":..,"seq":..} DSNAP: <正文>
 //! ```
 //!
-//! 对应 `models/wpl/agent_uplink/parse.wpl` 里的
-//! `json(chars@schema, chars@agent, chars@ts, digit@seq), symbol(DSNAP:), chars:body\0`，
-//! 符号两侧各有一个空格（agentd 的 `build_discovery_frame` 写的是 ` b" DSNAP: "`）。
+//! 对应 `models/wpl/cloud_inventory/parse.wpl` 里的
+//! `json(chars@schema, chars@agent, chars@ts, digit@seq), symbol(CLOUDINV:), chars:body`，
+//! 符号两侧各有一个空格。
 //!
 //! 这里照搬同一形态，只把符号换成 ` CLOUDINV: `。**不要**把快照直接当 JSON 发出去：
 //! 那样 WPL 的 `json(...), symbol(...)` 结构对不上，记录会落进兜底 sink 或被拒。
+//! 也**不要**在正文末尾补 NUL：实际 WPL 是 `chars:body`，引擎会把 NUL 一起收进 body。
 //!
 //! 字段取值都来自快照本身（`collected_at` 而不是 `now()`），这样**同一 `snap_id` 重放
 //! 的帧字节完全一致**，幂等可以直接比对。

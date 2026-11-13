@@ -8,7 +8,7 @@
 
 use std::path::PathBuf;
 
-use chrono::{Datelike, NaiveDate, Utc};
+use chrono::{Datelike, FixedOffset, NaiveDate, Utc};
 use harvest_core::cost::{
     COST_MANIFEST_SCHEMA, CostBasis, CostRange, CostShardWriter, PeriodSource,
 };
@@ -70,7 +70,6 @@ pub async fn run(
     )
     .with_rows_per_shard(cfg.source.cost.rows_per_shard);
 
-    let mut kept: u64 = 0;
     let mut out_of_range: u64 = 0;
     let outcome = source
         .fetch_cost(&range, |row| {
@@ -79,10 +78,7 @@ pub async fn run(
                 &range,
                 &cfg.source.cost.currency,
             ) {
-                Ok(Some(detail)) => {
-                    writer.push(detail)?;
-                    kept += 1;
-                }
+                Ok(Some(detail)) => writer.push(detail)?,
                 // 不在本范围（按日范围从整月数据里筛出来时的常态）。
                 Ok(None) => out_of_range += 1,
                 Err(err) => return Err(err),
@@ -94,16 +90,17 @@ pub async fn run(
     let stat = match outcome {
         Ok(stat) => stat,
         Err(err) => {
-            // 失败就**不写 manifest**：没有清单的分片是垃圾，不能留下「看起来能入账」的东西。
-            eprintln!("抓取失败（未写 manifest，本轮分片作废）: {err}");
+            // 失败就**不发布**：分片只在暂存区，已发布的批次一字未动。
+            eprintln!("抓取失败（未发布：既有 manifest 与分片保持不变）: {err}");
             return 2;
         }
     };
+    writer.set_request_ids(stat.request_ids.clone());
 
     let (manifest_path, manifest) = match writer.finish() {
         Ok(done) => done,
         Err(err) => {
-            eprintln!("写 manifest 失败: {err}");
+            eprintln!("发布成本分片/manifest 失败（旧批次保持有效）: {err}");
             return 2;
         }
     };
@@ -131,7 +128,6 @@ pub async fn run(
         "retries": stat.retries,
     });
     println!("{}", serde_json::to_string_pretty(&out).unwrap_or_default());
-    let _ = kept;
     0
 }
 
@@ -162,16 +158,9 @@ fn build_range(
             (CostBasis::Consumption, date, date)
         }
         (None, None) => {
-            let today = Utc::now().date_naive();
-            let (year, month_number) = if today.month() == 1 {
-                (today.year() - 1, 12)
-            } else {
-                (today.year(), today.month() - 1)
-            };
-            let start = NaiveDate::from_ymd_opt(year, month_number, 1)
-                .ok_or_else(|| "上个月首日不可用".to_string())?;
-            let end = NaiveDate::from_ymd_opt(year, month_number, days_in_month(start))
-                .ok_or_else(|| "上个月末日不可用".to_string())?;
+            // **按北京时间**算「上个月」：默认值就是给「月初结算上个月」用的，
+            // 而 UTC 在月初 00:00–08:00 还停在上个月末，会把默认账期又退一个月。
+            let (start, end) = previous_month_range(Utc::now());
             (CostBasis::Charge, start, end)
         }
         (Some(_), Some(_)) => unreachable!("已在上面拦掉"),
@@ -208,6 +197,23 @@ fn parse_month_start(month: &str) -> Result<NaiveDate, String> {
         .map_err(|err| format!("--month 必须是 YYYY-MM: {err}"))
 }
 
+/// 「上一个自然月」，按 Asia/Shanghai 挂钟时间算。
+///
+/// 用 UTC 算会在月初 00:00–08:00 CST 错一个月（那时 UTC 还是上个月末）。
+fn previous_month_range(now: chrono::DateTime<Utc>) -> (NaiveDate, NaiveDate) {
+    let offset = FixedOffset::east_opt(8 * 3600).expect("+08:00 是合法偏移");
+    let today = now.with_timezone(&offset).date_naive();
+    let (year, month) = if today.month() == 1 {
+        (today.year() - 1, 12)
+    } else {
+        (today.year(), today.month() - 1)
+    };
+    let start = NaiveDate::from_ymd_opt(year, month, 1).expect("上个月首日必然存在");
+    let end =
+        NaiveDate::from_ymd_opt(year, month, days_in_month(start)).expect("上个月末日必然存在");
+    (start, end)
+}
+
 fn days_in_month(start: NaiveDate) -> u32 {
     let (year, month) = (start.year(), start.month());
     let next = if month == 12 {
@@ -242,5 +248,23 @@ mod tests {
     fn a_malformed_month_is_rejected() {
         assert!(parse_month_start("2026-13").is_err());
         assert!(parse_month_start("202610").is_err());
+    }
+
+    #[test]
+    fn default_month_follows_the_shanghai_wall_clock() {
+        let at = |text: &str| {
+            chrono::DateTime::parse_from_rfc3339(text)
+                .unwrap()
+                .with_timezone(&Utc)
+        };
+        // UTC 还是 10-31 23:30，北京时间已经是 11-01 07:30：上个月应当是 10 月。
+        let (start, end) = previous_month_range(at("2026-10-31T23:30:00Z"));
+        assert_eq!(start, NaiveDate::from_ymd_opt(2026, 10, 1).unwrap());
+        assert_eq!(end, NaiveDate::from_ymd_opt(2026, 10, 31).unwrap());
+
+        // 跨年：北京时间 2026-01-01 01:00 → 上个月是 2025-12。
+        let (start, end) = previous_month_range(at("2025-12-31T17:00:00Z"));
+        assert_eq!(start, NaiveDate::from_ymd_opt(2025, 12, 1).unwrap());
+        assert_eq!(end, NaiveDate::from_ymd_opt(2025, 12, 31).unwrap());
     }
 }

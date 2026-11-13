@@ -114,17 +114,28 @@ fn load_sorted<T: DeserializeOwned + HasId>(
 ) -> Result<Vec<T>, HarvestError> {
     let mut rows: Vec<T> = Vec::new();
     for record in spool.manifest().items_of(asset_type) {
-        rows.extend(spool.read_rows::<T>(record)?);
+        rows.extend(read_checked::<T>(spool, record)?);
     }
     rows.sort_by(|a, b| a.source_asset_id().cmp(b.source_asset_id()));
     Ok(rows)
+}
+
+/// 读一个工作项的行。读取失败/行数不符一律是**完整性问题**（→ `Aborted`，零帧），
+/// 不是普通 IO 错误 —— 它直接决定这一帧能不能发。
+fn read_checked<T: DeserializeOwned>(
+    spool: &Spool,
+    record: &crate::spool::ItemRecord,
+) -> Result<Vec<T>, HarvestError> {
+    spool
+        .read_rows::<T>(record)
+        .map_err(|err| HarvestError::integrity(err.to_string()))
 }
 
 /// EIP 双路合并：按 `AddressId` 去重，保留首次出现的（lane 顺序来自 plan，稳定）。
 fn load_eips(spool: &Spool) -> Result<Vec<Eip>, HarvestError> {
     let mut rows: Vec<Eip> = Vec::new();
     for record in spool.manifest().items_of(AssetType::Eip) {
-        rows.extend(spool.read_rows::<Eip>(record)?);
+        rows.extend(read_checked::<Eip>(spool, record)?);
     }
     Ok(rows)
 }

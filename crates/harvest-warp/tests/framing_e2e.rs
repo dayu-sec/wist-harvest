@@ -222,7 +222,11 @@ impl Source for FailingSource {
     }
 
     fn verify(&self, manifest: &Manifest) -> Result<(), HarvestError> {
-        harvest_core::integrity::verify_manifest(manifest, false).map(|_| ())
+        harvest_core::integrity::verify_manifest(
+            manifest,
+            &harvest_core::config::AllowEmpty::All(false),
+        )
+        .map(|_| ())
     }
 }
 

@@ -2,6 +2,40 @@
 
 ## Unreleased
 
+### 正确性（不完整不发 / 不误删）
+
+- **覆盖范围按类型收敛**：`regions="auto"` 但关掉了某一类资产时，`coverage.scope`
+  自动从 `account` 降为 `partial`，空数组不再被当成「这类资产都没了」的退役证据。
+  收敛逻辑放在 `Coverage::for_planned_types`（core 层），任何 `Source` 都绕不过。
+- **计划变更不再死循环**：改了 `[assets]` 开关后旧 spool 会被标记 `Abandoned` 并开新
+  `snap_id`，而不是每轮撞在同一个校验错误上、永不发布。新增 `RunState::Abandoned`。
+- **续跑加年龄上限**：`service.max_resume_age_ms`（默认 24h）。永久性局部失败不会再把
+  一份旧 spool 无限续下去（那会让采集器永不产出新快照且 `collected_at` 停在过去）。
+- **组装前核对文件本身**：实际行数必须与 manifest 一致；spool 文件缺失/不匹配一律
+  `Aborted`，不再静默当成 0 行发出去。
+- **`allow_empty` 可按类型**：`allow_empty = ["EIP"]`，不必为养一个空类型把其余类型的
+  「空 ≠ 失败」保护一起关掉。
+
+### 成本链路
+
+- **分片先暂存后入位**：抓取期间只写 `.staging-<batch_id>/`，完整成功后才 `rename`
+  进最终对象键，manifest 最后原子替换。抓取失败不再污染已发布批次的字节
+  （此前会覆写最终键，导致旧 manifest 的 sha256 与实际文件对不上、被 `wist-cost` 整批拒收）。
+- 同一范围重发时清理新 manifest 未列出的旧分片，不留孤儿。
+- **金额解析失败报错**：`DecimalSum::add` 不再把读不出来的金额静默归零（`"0"` 是
+  「确认为零」，不能拿来兜底）；`parse_scaled` 拒绝 `+1.5` / `1e3` / 千分位等形态。
+- `cost` 默认账期按 **Asia/Shanghai** 算：UTC 在月初 00:00–08:00 会多退一个月。
+- manifest 写入 `request_ids`；manifest 本身改为临时文件 + `rename` 原子替换。
+
+### 其他
+
+- TLS 握手也纳入 `connect_timeout`，对端 TCP 通但握手卡住时不再挂死整轮。
+- spool 目录名安全化（`region` / `lane` 拼路径前统一 `sanitize`）。
+- 启动失败的报告改用 `start-<ts>.json`，不再反复覆盖同一份 `-.json`。
+- 修正文档漂移：帧格式（ASCII 十进制长度）、`--account` 不存在的描述、
+  `Interval` 语义、WPL 的 `chars:body`（无 NUL）。
+- 修掉 clippy `-D warnings` 的测试代码告警，门禁恢复绿色。
+
 - 新增 `run` 常驻调子命令：`--run-at`（默认 00:30 Asia/Shanghai）或 `--interval`，
   叠加 `--jitter`（默认 5 分钟）错开多站点；单轮并发（上一轮未结束则跳过并 warn）；
   失败按指数退避重试且**不推迟下一次定点**；SIGTERM/SIGINT 优雅退出（退出码 0）。

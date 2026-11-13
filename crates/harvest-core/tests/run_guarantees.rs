@@ -9,7 +9,7 @@ use std::path::Path;
 use std::sync::Mutex;
 
 use async_trait::async_trait;
-use harvest_core::config::ServiceConfig;
+use harvest_core::config::{AllowEmpty, ServiceConfig};
 use harvest_core::error::{ErrorClass, HarvestError};
 use harvest_core::model::{AssetType, CloudHost, Vendor};
 use harvest_core::run::{RunOptions, run_once};
@@ -28,6 +28,7 @@ struct FakeSource {
     fail_on: Mutex<Option<String>>,
     expected_rows: Option<u64>,
     calls: Mutex<Vec<String>>,
+    allow_empty: AllowEmpty,
 }
 
 impl FakeSource {
@@ -41,7 +42,14 @@ impl FakeSource {
             fail_on: Mutex::new(None),
             expected_rows: None,
             calls: Mutex::new(Vec::new()),
+            allow_empty: AllowEmpty::All(false),
         }
+    }
+
+    /// 改采集计划（模拟改了配置后重启）：多一条分页道，地域集合不变。
+    fn add_lane(&mut self, region: &str, lane: &str) {
+        self.plan
+            .push(WorkItem::new(AssetType::CloudHost, region, lane));
     }
 
     fn fail_on(&self, key: impl Into<String>) {
@@ -78,9 +86,9 @@ impl Source for FakeSource {
 
         let rows: Vec<CloudHost> = (0..self.rows)
             .map(|idx| CloudHost {
-                host_id: format!("ins-{}-{idx}", item.region),
+                host_id: format!("ins-{}-{}-{idx}", item.region, item.lane),
                 host_name: format!("host-{}-{idx}", item.region),
-                source_asset_id: format!("ins-{}-{idx}", item.region),
+                source_asset_id: format!("ins-{}-{}-{idx}", item.region, item.lane),
                 region: item.region.clone(),
                 ..Default::default()
             })
@@ -98,7 +106,7 @@ impl Source for FakeSource {
     }
 
     fn verify(&self, manifest: &harvest_core::spool::Manifest) -> Result<(), HarvestError> {
-        harvest_core::integrity::verify_manifest(manifest, false).map(|_| ())
+        harvest_core::integrity::verify_manifest(manifest, &self.allow_empty).map(|_| ())
     }
 }
 
@@ -126,13 +134,18 @@ impl Sink for RecordingSink {
 }
 
 fn service_config(spool_dir: &Path, state_dir: &Path) -> ServiceConfig {
+    service_config_with(spool_dir, state_dir, "")
+}
+
+/// 同上，额外给一段 `[service]` 覆写（例如 `max_resume_age_ms`）。
+fn service_config_with(spool_dir: &Path, state_dir: &Path, extra: &str) -> ServiceConfig {
     ServiceConfig::parse(&format!(
         r#"
 [service]
 spool_dir = "{spool}"
 state_dir = "{state}"
 page_size = 100
-
+{extra}
 [sink]
 endpoint = "127.0.0.1:1"
 allow_plaintext = true
@@ -279,7 +292,7 @@ async fn replay_same_snap_id_is_byte_identical() {
     assert_eq!(payload["assets"]["CLOUD_HOST"].as_array().unwrap().len(), 4);
 }
 
-/// 从线上记录里取快照正文：`<JSON 头>CLOUDINV:<正文>\0`。
+/// 从线上记录里取快照正文：`<JSON 头>CLOUDINV:<正文>`（无 NUL）。
 fn wire_body(bytes: &[u8]) -> serde_json::Value {
     let symbol = harvest_core::wire::WIRE_SYMBOL.as_bytes();
     let at = bytes
@@ -312,5 +325,149 @@ async fn fresh_run_gets_a_new_snap_id_and_does_not_resume() {
     assert_ne!(
         first.report.snap_id, second.report.snap_id,
         "新一轮必须是新 snap_id（同一秒内也不能撞车）"
+    );
+}
+
+#[tokio::test]
+async fn plan_change_abandons_the_old_spool_instead_of_deadlocking() {
+    // 改了采集计划（例如 `[assets]` 开关）后，旧 spool 永远不可能变合法。
+    // 若它继续可续跑，采集器会每轮撞在同一个校验错误上，永不发布。
+    let dir = tempfile::tempdir().unwrap();
+    let svc = service_config(&dir.path().join("spool"), &dir.path().join("state"));
+    let scope = scope();
+    let mut source = FakeSource::new(&["ap-guangzhou", "ap-shanghai"]);
+    source.fail_on("CLOUD_HOST/ap-shanghai.default");
+    let sink = RecordingSink::default();
+
+    let first = run_once(&svc, &scope, &source, &sink, &RunOptions::default()).await;
+    assert_eq!(first.state, RunState::Aborted);
+    let old_dir = spool_dir_for(&svc.service.spool_dir, &scope, &first.snap_id);
+    assert_eq!(
+        Spool::open_existing(&old_dir).unwrap().manifest().state,
+        RunState::Aborted
+    );
+
+    // 计划多了一条分页道（相当于现场改了 sources.d）；地域集合没变。
+    source.clear_failures();
+    source.add_lane("ap-guangzhou", "extra");
+    let second = run_once(&svc, &scope, &source, &sink, &RunOptions::default()).await;
+
+    assert_eq!(second.state, RunState::Done, "{:?}", second.report.errors);
+    assert!(!second.report.resumed, "不能续跑计划已变的旧 spool");
+    assert_ne!(second.snap_id, first.snap_id, "必须是新的 snap_id");
+    assert_eq!(
+        Spool::open_existing(&old_dir).unwrap().manifest().state,
+        RunState::Abandoned,
+        "旧 spool 保留供诊断，但不再可续跑"
+    );
+
+    // 第三轮不应再挑到那份 Abandoned 的 spool。
+    let third = run_once(&svc, &scope, &source, &sink, &RunOptions::default()).await;
+    assert_eq!(third.state, RunState::Done);
+    assert!(!third.report.resumed, "Abandoned 的 spool 不能被续跑");
+    assert_ne!(third.snap_id, second.snap_id);
+}
+
+#[tokio::test]
+async fn a_missing_spool_file_aborts_instead_of_publishing_zero_rows() {
+    // manifest 说「这些工作项有 N 行」，但文件被清理/回滚了。
+    // 只信 manifest 就会发出一条 0 行且 complete=true 的快照（图上的资产被误删）。
+    let dir = tempfile::tempdir().unwrap();
+    let svc = service_config(&dir.path().join("spool"), &dir.path().join("state"));
+    let scope = scope();
+    let source = FakeSource::new(&["ap-guangzhou", "ap-shanghai"]);
+    let sink = RecordingSink::default();
+
+    let first = run_once(&svc, &scope, &source, &sink, &RunOptions::default()).await;
+    assert_eq!(first.state, RunState::Done);
+    assert_eq!(sink.frames().len(), 1);
+
+    // 删掉 spool 里的数据文件，把状态退回 Verified（模拟「重发前发现文件没了」）。
+    let snap_dir = spool_dir_for(&svc.service.spool_dir, &scope, &first.snap_id);
+    let mut spool = Spool::open_existing(&snap_dir).unwrap();
+    for record in &spool.manifest().items {
+        std::fs::remove_file(snap_dir.join(&record.file)).unwrap();
+    }
+    spool.set_state(RunState::Verified);
+    spool.save().unwrap();
+    let calls_before = source.calls().len();
+
+    let second = run_once(&svc, &scope, &source, &sink, &RunOptions::default()).await;
+
+    assert_eq!(second.state, RunState::Aborted);
+    assert_eq!(second.snap_id, first.snap_id, "续跑的是同一份 spool");
+    assert_eq!(sink.frames().len(), 1, "不能多发一条 0 行的快照");
+    assert_eq!(source.calls().len(), calls_before, "已完成的工作项不应重抓");
+    assert!(
+        second
+            .report
+            .abort_reason
+            .as_deref()
+            .unwrap_or_default()
+            .contains("不可读"),
+        "{:?}",
+        second.report.abort_reason
+    );
+}
+
+#[tokio::test]
+async fn an_expired_spool_is_abandoned_instead_of_resumed_forever() {
+    // 永久性的局部失败（没权限的地域、不开放的产物）会让旧 spool 永远续不完。
+    // 超过时限就必须放弃，否则采集器永远不产出新快照，`collected_at` 也永远停在过去。
+    let dir = tempfile::tempdir().unwrap();
+    let svc = service_config_with(
+        &dir.path().join("spool"),
+        &dir.path().join("state"),
+        "max_resume_age_ms = 1",
+    );
+    let scope = scope();
+    let source = FakeSource::new(&["ap-guangzhou", "ap-shanghai"]);
+    source.fail_on("CLOUD_HOST/ap-shanghai.default");
+    let sink = RecordingSink::default();
+
+    let first = run_once(&svc, &scope, &source, &sink, &RunOptions::default()).await;
+    assert_eq!(first.state, RunState::Aborted);
+    let old_dir = spool_dir_for(&svc.service.spool_dir, &scope, &first.snap_id);
+
+    // 把创建时间推到很早（不必真等）。
+    let mut spool = Spool::open_existing(&old_dir).unwrap();
+    spool.manifest_mut().created_at = "2020-01-01T00:00:00.000Z".to_string();
+    spool.save().unwrap();
+
+    source.clear_failures();
+    let second = run_once(&svc, &scope, &source, &sink, &RunOptions::default()).await;
+
+    assert_eq!(second.state, RunState::Done, "{:?}", second.report.errors);
+    assert!(!second.report.resumed, "过期的 spool 不能续跑");
+    assert_ne!(second.snap_id, first.snap_id);
+    assert_eq!(
+        Spool::open_existing(&old_dir).unwrap().manifest().state,
+        RunState::Abandoned
+    );
+}
+
+#[tokio::test]
+async fn an_empty_type_needs_an_explicit_allowance() {
+    // 0 行默认是可疑的（空 ≠ 失败）。
+    let dir = tempfile::tempdir().unwrap();
+    let svc = service_config(&dir.path().join("spool"), &dir.path().join("state"));
+    let scope = scope();
+    let mut source = FakeSource::new(&["ap-guangzhou", "ap-shanghai"]);
+    source.rows = 0;
+    let sink = RecordingSink::default();
+
+    let first = run_once(&svc, &scope, &source, &sink, &RunOptions::fresh()).await;
+    assert_eq!(first.state, RunState::Aborted);
+    assert_eq!(sink.frames().len(), 0, "0 行不能发");
+
+    // 只给这一类型显式放行：仍然要能发出去（确实是空的账号）。
+    source.allow_empty = AllowEmpty::Types(vec![AssetType::CloudHost]);
+    let second = run_once(&svc, &scope, &source, &sink, &RunOptions::fresh()).await;
+    assert_eq!(second.state, RunState::Done, "{:?}", second.report.errors);
+    assert_eq!(sink.frames().len(), 1);
+    let payload = wire_body(&sink.frames()[0].bytes);
+    assert_eq!(
+        payload["stats"]["CLOUD_HOST"]["total"],
+        serde_json::json!(0)
     );
 }

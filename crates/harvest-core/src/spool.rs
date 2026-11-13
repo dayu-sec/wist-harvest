@@ -110,9 +110,13 @@ impl ItemRecord {
 }
 
 fn item_file(item: &WorkItem) -> String {
+    // 地域/分页道来自云响应或配置，拼进路径前统一安全化：
+    // 正常地域码（`ap-guangzhou`）不受影响，但不会因为一个奇怪字符就跑出 spool 目录。
     format!(
         "items/{}/{}.{}.ndjson",
-        item.asset_type, item.region, item.lane
+        item.asset_type,
+        crate::scope::sanitize(&item.region),
+        crate::scope::sanitize(&item.lane)
     )
 }
 
@@ -166,7 +170,8 @@ pub struct Spool {
 }
 
 impl Spool {
-    /// 建一份新 spool。目录已存在（同一 snap_id 重放）时直接复用。
+    /// 建一份新 spool。目录里已有 `manifest.json` 时直接沿用它（同 `snap_id` 重放），
+    /// 而不是重建一份——重建会丢掉已完成的记账，让重放变回全量重抓。
     pub fn create(
         spool_root: &Path,
         scope: &Scope,
@@ -174,6 +179,24 @@ impl Spool {
         plan: &[WorkItem],
     ) -> Result<Self, SpoolError> {
         let dir = spool_root.join(scope.spool_prefix()).join(snap_id);
+        if dir.join("manifest.json").exists() {
+            let existing = Self::open_existing(&dir)?;
+            // 重放的前提是「同一份计划」：否则旧 manifest 里没有新工作项的记账，
+            // 抓到的行会静默丢掉，最后发出去的还是旧数据。宁可报错让人换 snap_id。
+            if let Some((expected, actual)) = existing.plan_mismatch(plan) {
+                return Err(SpoolError::new(format!(
+                    "snap_id {snap_id} 已有 spool，但采集计划不一致（计划 {:?} vs spool {:?}）；换一个 snap_id，或先移走 {}",
+                    expected,
+                    actual,
+                    dir.display()
+                )));
+            }
+            crate::redact::warn(format!(
+                "spool 已存在，沿用既有 manifest（不重建）: {}",
+                dir.display()
+            ));
+            return Ok(existing);
+        }
         std::fs::create_dir_all(dir.join("items"))?;
         let created_at_utc = crate::time::utc_now();
         let now = crate::time::rfc3339_utc(created_at_utc);
@@ -210,7 +233,24 @@ impl Spool {
         })
     }
 
+    /// 续跑必须保证计划没变：配置改了地域/类型就是另一个范围，不能混进同一帧。
+    pub fn plan_mismatch(&self, plan: &[WorkItem]) -> Option<(Vec<String>, Vec<String>)> {
+        let manifest = self.manifest();
+        let mut expected: Vec<String> = plan.iter().map(WorkItem::key).collect();
+        expected.sort();
+        let mut actual: Vec<String> = manifest.items.iter().map(|r| r.item().key()).collect();
+        actual.sort();
+        if expected == actual {
+            None
+        } else {
+            Some((expected, actual))
+        }
+    }
+
     /// 找同一范围下"没做完"的 spool（可续跑）。按 `created_at` 取最新一份。
+    ///
+    /// 跳过两类：`Done`（已完成）与 `Abandoned`（计划变了，永远不可能变合法）。
+    /// 「不完整不发」不等于「不完整就一直续跑」—— 后者会让采集器卡死在旧 spool 上。
     pub fn find_resumable(spool_root: &Path, scope: &Scope) -> Result<Option<PathBuf>, SpoolError> {
         let prefix = spool_root.join(scope.spool_prefix());
         let entries = match std::fs::read_dir(&prefix) {
@@ -236,7 +276,9 @@ impl Spool {
             let Ok(manifest) = serde_json::from_str::<Manifest>(&raw) else {
                 continue;
             };
-            if manifest.scope_hash != wanted_hash || manifest.state == RunState::Done {
+            if manifest.scope_hash != wanted_hash
+                || matches!(manifest.state, RunState::Done | RunState::Abandoned)
+            {
                 continue;
             }
             match &best {
@@ -285,6 +327,30 @@ impl Spool {
         self.manifest.state = state;
     }
 
+    /// 放弃这份 spool：保留目录与已完成的数据供诊断，但不再参与续跑。
+    pub fn abandon(&mut self, reason: &str) -> Result<(), SpoolError> {
+        self.set_error(ErrorClass::Integrity, reason);
+        self.set_state(RunState::Abandoned);
+        self.save()
+    }
+
+    /// 这份 spool 已经放了多久（毫秒）。
+    ///
+    /// `created_at` 解析失败按「很久以前」处理：宁可不续跑，也不要把一份来路不明的
+    /// spool 无限期地延续下去。
+    pub fn age_ms(&self) -> i64 {
+        chrono::DateTime::parse_from_rfc3339(&self.manifest.created_at)
+            .map(|created| {
+                (crate::time::utc_now() - created.with_timezone(&chrono::Utc)).num_milliseconds()
+            })
+            .unwrap_or(i64::MAX)
+    }
+
+    /// 是否已经超过可续跑时限（`limit_ms == 0` 表示不限制）。
+    pub fn resume_expired(&self, limit_ms: u64) -> bool {
+        limit_ms > 0 && self.age_ms() > limit_ms as i64
+    }
+
     pub fn set_error(&mut self, class: ErrorClass, message: &str) {
         self.manifest.error = Some(ManifestError {
             class,
@@ -307,18 +373,25 @@ impl Spool {
             std::fs::create_dir_all(parent)?;
         }
         File::create(&path)?;
-        if let Some(record) = self.manifest.item_mut(item) {
-            record.rows = 0;
-            record.pages = 0;
-            record.request_ids.clear();
-            record.expected_rows = None;
-            record.retries = 0;
-            record.duration_ms = 0;
-            record.completed = false;
-            record.error = None;
-            record.fetched_at = None;
-        }
+        let record = self.record_mut(item)?;
+        record.rows = 0;
+        record.pages = 0;
+        record.request_ids.clear();
+        record.expected_rows = None;
+        record.retries = 0;
+        record.duration_ms = 0;
+        record.completed = false;
+        record.error = None;
+        record.fetched_at = None;
         self.save()
+    }
+
+    /// 取工作项对应的记账行；没有就是「计划与 spool 不一致」，不能静默丢数据。
+    fn record_mut(&mut self, item: &WorkItem) -> Result<&mut ItemRecord, SpoolError> {
+        let key = item.key();
+        self.manifest
+            .item_mut(item)
+            .ok_or_else(|| SpoolError::new(format!("工作项 {key} 不在 spool 的计划里")))
     }
 
     /// 追加一页的行到 spool（NDJSON）。
@@ -339,25 +412,23 @@ impl Spool {
             writer.write_all(b"\n")?;
         }
         writer.flush()?;
-        if let Some(record) = self.manifest.item_mut(item) {
-            record.rows += rows.len() as u64;
-        }
+        let written = rows.len() as u64;
+        self.record_mut(item)?.rows += written;
         Ok(())
     }
 
     pub fn finish_item(&mut self, item: &WorkItem, stat: &FetchStat) -> Result<(), SpoolError> {
         let fetched_at = crate::time::rfc3339_utc(crate::time::utc_now());
-        if let Some(record) = self.manifest.item_mut(item) {
-            record.rows = stat.rows;
-            record.pages = stat.pages;
-            record.expected_rows = stat.expected_rows;
-            record.retries = stat.retries;
-            record.duration_ms = stat.duration_ms;
-            record.request_ids = stat.request_ids.clone();
-            record.fetched_at = Some(fetched_at);
-            record.completed = true;
-            record.error = None;
-        }
+        let record = self.record_mut(item)?;
+        record.rows = stat.rows;
+        record.pages = stat.pages;
+        record.expected_rows = stat.expected_rows;
+        record.retries = stat.retries;
+        record.duration_ms = stat.duration_ms;
+        record.request_ids = stat.request_ids.clone();
+        record.fetched_at = Some(fetched_at);
+        record.completed = true;
+        record.error = None;
         self.save()
     }
 
@@ -369,6 +440,12 @@ impl Spool {
         }
     }
 
+    /// 读一个工作项的全部行，**并核对文件本身**。
+    ///
+    /// 为什么不能只信 manifest：`record.rows` 是上次运行的记账，文件可能被清理、
+    /// 回滚或只写了一半。如果文件丢了就返回空集合，最终会发出一条「这类资产 0 行」
+    /// 且 `complete=true` 的快照——恰好是这套设计最想避免的事故。
+    /// 所以这里对「文件存在」和「行数」都做硬校验，不匹配一律报错（→ `Aborted`）。
     pub fn read_rows<T: DeserializeOwned>(
         &self,
         record: &ItemRecord,
@@ -376,8 +453,17 @@ impl Spool {
         let path = self.dir.join(&record.file);
         let file = match File::open(&path) {
             Ok(file) => file,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-            Err(err) => return Err(err.into()),
+            // 0 行的工作项允许没有文件（`append_rows` 空页不落盘）；
+            // 但 manifest 记了行数就必须能读到，否则就是 spool 被清理/回滚了。
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound && record.rows == 0 => {
+                return Ok(Vec::new());
+            }
+            Err(err) => {
+                return Err(SpoolError::new(format!(
+                    "spool 文件 {} 不可读（manifest 记了 {} 行）: {err}",
+                    record.file, record.rows
+                )));
+            }
         };
         let mut rows = Vec::new();
         for (idx, line) in BufReader::new(file).lines().enumerate() {
@@ -389,6 +475,14 @@ impl Spool {
                 SpoolError::new(format!("{} 第 {} 行解析失败: {err}", record.file, idx + 1))
             })?;
             rows.push(row);
+        }
+        if rows.len() as u64 != record.rows {
+            return Err(SpoolError::new(format!(
+                "spool 文件 {} 实际 {} 行，manifest 记了 {} 行",
+                record.file,
+                rows.len(),
+                record.rows
+            )));
         }
         Ok(rows)
     }

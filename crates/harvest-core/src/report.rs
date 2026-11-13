@@ -145,8 +145,16 @@ impl RunReport {
 
     /// 原子写盘：`<runs_dir>/<snap_id>.json`。
     pub fn write(&self, runs_dir: &Path) -> Result<PathBuf, SpoolError> {
+        self.write_as(runs_dir, &self.snap_id)
+    }
+
+    /// 同上，但指定文件名。
+    ///
+    /// 用于「轮次还没开始就失败」的情形：那时没有 `snap_id`，不能所有启动失败
+    /// 都覆盖同一份 `-.json`，否则重启风暴会把排障记录冲干净。
+    pub fn write_as(&self, runs_dir: &Path, name: &str) -> Result<PathBuf, SpoolError> {
         std::fs::create_dir_all(runs_dir).map_err(SpoolError::from)?;
-        let path = runs_dir.join(format!("{}.json", crate::scope::sanitize(&self.snap_id)));
+        let path = runs_dir.join(format!("{}.json", crate::scope::sanitize(name)));
         let tmp = path.with_extension("json.tmp");
         let raw = serde_json::to_vec_pretty(self)
             .map_err(|err| SpoolError::new(format!("报告序列化失败: {err}")))?;

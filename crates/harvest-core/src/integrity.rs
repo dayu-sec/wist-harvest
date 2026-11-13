@@ -6,12 +6,13 @@
 //! 2. 每项的实收行数与云端声明的 `TotalCount` 一致（分页总数不一致立刻失败）；
 //! 3. 页数连续（至少 1 页，且抓取时逐页递增到 `TotalCount`）；
 //! 4. 地域齐全（工作项覆盖的地域集合 == 计划地域集合）；
-//! 5. 空 ≠ 失败：只有显式允许时才接受某类型 0 行。
+//! 5. 空 ≠ 失败：只有显式允许时才接受某类型 0 行（`allow_empty` 可以按类型给）。
 //!
 //! ID 去重不在这里做：需要真实行内容，见 [`crate::assemble`]。
 
 use std::collections::BTreeMap;
 
+use crate::config::AllowEmpty;
 use crate::error::HarvestError;
 use crate::model::AssetType;
 use crate::spool::Manifest;
@@ -25,7 +26,7 @@ pub struct VerifySummary {
 
 pub fn verify_manifest(
     manifest: &Manifest,
-    allow_empty: bool,
+    allow_empty: &AllowEmpty,
 ) -> Result<VerifySummary, HarvestError> {
     if manifest.items.is_empty() {
         return Err(HarvestError::integrity("manifest 里没有任何工作项"));
@@ -83,14 +84,12 @@ pub fn verify_manifest(
         )));
     }
 
-    // 5. 空 ≠ 失败
-    if !allow_empty {
-        for (asset_type, rows) in &summary.rows_by_type {
-            if *rows == 0 {
-                return Err(HarvestError::integrity(format!(
-                    "类型 {asset_type} 采到 0 行；确认云端确实为空后需显式开启 service.allow_empty"
-                )));
-            }
+    // 5. 空 ≠ 失败（按类型判定，开关也可以按类型给）
+    for (asset_type, rows) in &summary.rows_by_type {
+        if *rows == 0 && !allow_empty.allows(*asset_type) {
+            return Err(HarvestError::integrity(format!(
+                "类型 {asset_type} 采到 0 行；确认云端确实为空后需显式开启 service.allow_empty（可只针对该类型）"
+            )));
         }
     }
 

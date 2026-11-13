@@ -5,6 +5,9 @@
 //!    |          |           |          |
 //!    +----------+-----------+----------+--> Aborted（保留 spool + 原因，不发送）
 //! ```
+//!
+//! 另有 `Abandoned`：本次运行**放弃**旧 spool（典型是采集计划变了），保留目录供诊断，
+//! 但不再参与续跑。它与 `Aborted` 的区别是「不再重试」。
 
 use serde::{Deserialize, Serialize};
 
@@ -19,6 +22,12 @@ pub enum RunState {
     Published,
     Done,
     Aborted,
+    /// 主动放弃：保留目录供诊断，但**不再续跑**。
+    ///
+    /// 和 `Aborted` 分开是必须的：`Aborted` 的语义是「这次没采全，下次接着采」，
+    /// 而计划变更（改了 `[assets]` 开关）之后的旧 spool 永远不可能变合法，
+    /// 如果它继续可续跑，采集器会每轮都撞在同一个校验错误上，永不发布。
+    Abandoned,
 }
 
 impl RunState {
@@ -31,11 +40,12 @@ impl RunState {
             Self::Published => "Published",
             Self::Done => "Done",
             Self::Aborted => "Aborted",
+            Self::Abandoned => "Abandoned",
         }
     }
 
     pub fn is_terminal(self) -> bool {
-        matches!(self, Self::Done | Self::Aborted)
+        matches!(self, Self::Done | Self::Aborted | Self::Abandoned)
     }
 
     /// 允许的下一步。
@@ -46,7 +56,7 @@ impl RunState {
             Self::Spooled => &[RunState::Verified, RunState::Aborted],
             Self::Verified => &[RunState::Published, RunState::Aborted],
             Self::Published => &[RunState::Done],
-            Self::Done | Self::Aborted => &[],
+            Self::Done | Self::Aborted | Self::Abandoned => &[],
         }
     }
 

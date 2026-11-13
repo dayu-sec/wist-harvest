@@ -320,6 +320,11 @@ fn source_config(dir: &Path, base: &str) -> SourceConfig {
 
 /// `regions` 直接拼进 TOML：`["ap-guangzhou"]` 或 `"auto"`。
 fn source_config_with_regions(dir: &Path, base: &str, regions: &str) -> SourceConfig {
+    source_config_with_assets(dir, base, regions, "")
+}
+
+/// 同上，额外给一段 `[assets]` 覆写（例如 `eip = false`）。
+fn source_config_with_assets(dir: &Path, base: &str, regions: &str, assets: &str) -> SourceConfig {
     let secret_id = write_secret(dir, "id.secret", "AKIDTESTSECRETID");
     let secret_key = write_secret(dir, "key.secret", "TESTSECRETKEYVALUE");
     SourceConfig::parse(&format!(
@@ -330,7 +335,7 @@ group = "inventory"
 env_ref = "prod"
 regions = {regions}
 endpoint_override = "{base}"
-
+{assets}
 [credential]
 secret_id = {{ file = "{id}" }}
 secret_key = {{ file = "{key}" }}
@@ -611,6 +616,47 @@ async fn auto_regions_declare_account_level_coverage() {
     assert_eq!(payload["coverage"]["scope"], json!("account"));
     assert_eq!(payload["coverage"]["complete"], json!(true));
     assert_eq!(payload["coverage"]["account"], json!("tencent:1300000000"));
+}
+
+#[tokio::test]
+async fn disabling_a_type_downgrades_coverage_to_partial() {
+    // 关掉一类资产后，这一类就是空数组 + 没采。帧里仍是 `[]`，
+    // 但**不能**再声称 `scope=account, complete=true`——那等于告诉下游「这类都没了」。
+    let dir = tempfile::tempdir().unwrap();
+    let mock = MockApi::spawn(Arc::new(inventory_handler)).await;
+    let svc = service_config(&dir.path().join("spool"), &dir.path().join("state"));
+    let cfg = source_config_with_assets(
+        dir.path(),
+        &mock.base,
+        r#""auto""#,
+        "[assets]\neip = false\n",
+    );
+
+    let source = TencentSource::init(cfg, &svc).await.expect("初始化");
+    let scope = source.scope();
+    let sink = RecordingSink::default();
+    let outcome = run_once(&svc, &scope, &source, &sink, &RunOptions::default()).await;
+    assert_eq!(outcome.state, RunState::Done, "{:?}", outcome.report.errors);
+
+    let frames = sink.frames.lock().unwrap();
+    let payload = body_of(&frames[0]);
+    assert_eq!(payload["assets"]["EIP"], json!([]));
+    assert_eq!(
+        payload["coverage"]["scope"],
+        json!("partial"),
+        "少一类就不能声明账号级全集，否则空数组会被当成退役证据"
+    );
+    assert_eq!(
+        payload["coverage"]["complete"],
+        json!(true),
+        "采集器自身的完整性校验仍然通过"
+    );
+    assert!(
+        mock.requests()
+            .iter()
+            .all(|request| request.action != "DescribeAddresses"),
+        "关掉的类型不应该再去调云 API"
+    );
 }
 
 #[tokio::test]

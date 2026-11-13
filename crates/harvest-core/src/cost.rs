@@ -246,13 +246,21 @@ const SCALE: i128 = 1_000_000_000_000_000_000; // 1e18
 const SCALE_DIGITS: usize = 18;
 
 impl DecimalSum {
-    pub fn add(&mut self, value: Option<&str>) {
+    /// 累加一个金额分量。
+    ///
+    /// **解析失败必须报错，不能归零**：`"0"` 在契约里表示「确认为零」，`null` 才是未知。
+    /// 把一只读不出来的金额当 0，会让账单少钱且无从发现 —— 这是钱链路上最坏的一种错。
+    pub fn add(&mut self, value: Option<&str>) -> Result<(), HarvestError> {
         let Some(raw) = value.map(str::trim).filter(|v| !v.is_empty()) else {
-            return;
+            return Ok(());
         };
-        let scaled = parse_scaled(raw);
-        self.scaled += scaled;
+        let scaled = parse_scaled(raw)?;
+        self.scaled = self
+            .scaled
+            .checked_add(scaled)
+            .ok_or_else(|| HarvestError::data_format(format!("金额累加溢出 18 位定标：{raw}")))?;
         self.known = true;
+        Ok(())
     }
 
     /// 输出契约要求的十进制字符串：`18` 位定标 → 去尾零；未知则 `None`。
@@ -264,7 +272,7 @@ impl DecimalSum {
     }
 }
 
-fn parse_scaled(raw: &str) -> i128 {
+fn parse_scaled(raw: &str) -> Result<i128, HarvestError> {
     let (negative, body) = match raw.strip_prefix('-') {
         Some(rest) => (true, rest),
         None => (false, raw),
@@ -273,14 +281,25 @@ fn parse_scaled(raw: &str) -> i128 {
         Some((int_part, frac)) => (int_part, frac),
         None => (body, ""),
     };
+    // 只接受纯十进制：出现 `+`、科学计数法、千分位、全角字符等一律报错，
+    // 而不是悄悄当成 0（宁可这轮不出，也不能出错的数）。
+    if !int_part.chars().all(|c| c.is_ascii_digit())
+        || !frac_part.chars().all(|c| c.is_ascii_digit())
+    {
+        return Err(HarvestError::data_format(format!(
+            "金额不是十进制字符串: {raw}"
+        )));
+    }
     // 超过 18 位小数就截断（云侧目前 8 位；截断比 panic 更安全，且不会放大金额）。
     let frac: String = frac_part.chars().take(SCALE_DIGITS).collect();
     let mut digits = String::with_capacity(int_part.len() + SCALE_DIGITS);
     digits.push_str(if int_part.is_empty() { "0" } else { int_part });
     digits.push_str(&frac);
     digits.extend(std::iter::repeat_n('0', SCALE_DIGITS - frac.len()));
-    let value: i128 = digits.parse().unwrap_or(0);
-    if negative { -value } else { value }
+    let value: i128 = digits
+        .parse()
+        .map_err(|_| HarvestError::data_format(format!("金额超出 18 位定标可表示的范围: {raw}")))?;
+    Ok(if negative { -value } else { value })
 }
 
 fn format_scaled(scaled: i128) -> String {
@@ -323,6 +342,9 @@ pub struct CostManifest {
     pub currency: String,
     pub period_source: PeriodSource,
     pub fetched_at: String,
+    /// 云 API `RequestId`，排障用（契约 §1 可选字段）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub request_ids: Vec<String>,
     pub shards: Vec<CostShard>,
     pub total_rows: u64,
 }
@@ -338,6 +360,7 @@ pub struct CostShardWriter {
     period_source: PeriodSource,
     fetched_at: String,
     batch_id: String,
+    request_ids: Vec<String>,
     rows_per_shard: u64,
     buffer: Vec<CostDetail>,
     shards: Vec<CostShard>,
@@ -360,12 +383,36 @@ impl CostShardWriter {
             period_source,
             fetched_at: fetched_at.into(),
             batch_id: batch_id.into(),
+            request_ids: Vec::new(),
             rows_per_shard: DEFAULT_ROWS_PER_SHARD,
             buffer: Vec::new(),
             shards: Vec::new(),
             total_rows: 0,
         }
     }
+
+    /// 云 API 的 `RequestId`，写进 manifest 供排障（不含凭据）。
+    pub fn set_request_ids(&mut self, request_ids: Vec<String>) {
+        self.request_ids = request_ids;
+    }
+
+    /// 本轮写入的**暂存目录**：分片先落这里，成功后才搬进最终对象键。
+    ///
+    /// 为什么必须暂存：最终键不含 `batch_id`（契约 §1 的布局），重采同一范围就是
+    /// **覆写已发布的字节**。如果在抓取中途失败，旧 manifest 会指着一批新字节，
+    /// 消费方 sha256 校验直接整批拒收。暂存把「失败」和「已发布」彻底隔开。
+    ///
+    /// 目录名带 batch_id，避免两次并发采集互相踩。
+    fn staging_dir(&self) -> PathBuf {
+        self.root.join(self.range.object_prefix()).join(format!(
+            ".staging-{}",
+            crate::scope::sanitize(&self.batch_id)
+        ))
+    }
+
+    // 没有正常收尾就退出（抓取失败/超限/进程内放弃）时，暂存目录里是**从未发布**的字节，
+    // 留着只会占盘并让下次排障多一份干扰。`finish` 成功时目录已经空了，这里是空操作。
+    // 注意：暂存目录就在范围目录下（同一文件系统），`rename` 不会跨设备。
 
     pub fn with_rows_per_shard(mut self, rows: u64) -> Self {
         self.rows_per_shard = rows.max(1);
@@ -402,16 +449,14 @@ impl CostShardWriter {
                 .map_err(|err| HarvestError::data_format(format!("分片行序列化失败: {err}")))?;
             bytes.push(b'\n');
         }
-        let key = format!("{}/{id}.ndjson", self.range.object_prefix());
-        let path = self.root.join(&key);
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|err| {
-                HarvestError::new(
-                    crate::error::ErrorClass::Other,
-                    format!("建分片目录 {}: {err}", parent.display()),
-                )
-            })?;
-        }
+        let dir = self.staging_dir();
+        std::fs::create_dir_all(&dir).map_err(|err| {
+            HarvestError::new(
+                crate::error::ErrorClass::Other,
+                format!("建分片暂存目录 {}: {err}", dir.display()),
+            )
+        })?;
+        let path = dir.join(format!("{id}.ndjson"));
         std::fs::write(&path, &bytes).map_err(|err| {
             HarvestError::new(
                 crate::error::ErrorClass::Other,
@@ -428,10 +473,15 @@ impl CostShardWriter {
         Ok(())
     }
 
-    /// 收尾：落最后一片 + 写 manifest，返回 manifest 路径。
+    /// 收尾：把暂存分片搬进最终对象键 + 原子替换 manifest，返回 manifest 路径。
     ///
-    /// manifest 落在范围目录下（`.../yyyy/mm/manifest.json`）：同一范围重复发布就是
-    /// 替换，所以只保留最新一份；要审计旧批次看 `batch_id` 与对象存储的版本。
+    /// 发布顺序（不可换）：
+    /// 1. 先写 manifest 到同目录的临时文件并 `fsync`；
+    /// 2. 再把分片从暂存目录 `rename` 到最终键；
+    /// 3. 最后 `rename` manifest——它是唯一发布凭据，最后一步生效。
+    ///
+    /// 这样**抓取失败永远不会影响已发布的字节**（分片还在暂存区）。
+    /// 同一范围重复发布就是替换：新 manifest 一生效，旧批次就不再是发布凭据。
     pub fn finish(mut self) -> Result<(PathBuf, CostManifest), HarvestError> {
         self.flush_shard()?;
         let manifest = CostManifest {
@@ -441,30 +491,108 @@ impl CostShardWriter {
             currency: self.currency.clone(),
             period_source: self.period_source,
             fetched_at: self.fetched_at.clone(),
+            request_ids: self.request_ids.clone(),
             shards: self.shards.clone(),
             total_rows: self.total_rows,
         };
-        let path = self
-            .root
-            .join(self.range.object_prefix())
-            .join("manifest.json");
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|err| {
+
+        let object_dir = self.root.join(self.range.object_prefix());
+        std::fs::create_dir_all(&object_dir).map_err(|err| {
+            HarvestError::new(
+                crate::error::ErrorClass::Other,
+                format!("建 manifest 目录 {}: {err}", object_dir.display()),
+            )
+        })?;
+        let manifest_path = object_dir.join("manifest.json");
+        let tmp = object_dir.join(format!(
+            ".manifest-{}.tmp",
+            crate::scope::sanitize(&self.batch_id)
+        ));
+        let bytes = serde_json::to_vec_pretty(&manifest)
+            .map_err(|err| HarvestError::data_format(format!("manifest 序列化失败: {err}")))?;
+        {
+            use std::io::Write;
+            let mut file = std::fs::File::create(&tmp).map_err(|err| {
                 HarvestError::new(
                     crate::error::ErrorClass::Other,
-                    format!("建 manifest 目录 {}: {err}", parent.display()),
+                    format!("写 manifest 临时文件 {}: {err}", tmp.display()),
+                )
+            })?;
+            file.write_all(&bytes).map_err(|err| {
+                HarvestError::new(
+                    crate::error::ErrorClass::Other,
+                    format!("写 manifest 临时文件 {}: {err}", tmp.display()),
+                )
+            })?;
+            file.sync_all().map_err(|err| {
+                HarvestError::new(
+                    crate::error::ErrorClass::Other,
+                    format!("同步 manifest 临时文件 {}: {err}", tmp.display()),
                 )
             })?;
         }
-        let bytes = serde_json::to_vec_pretty(&manifest)
-            .map_err(|err| HarvestError::data_format(format!("manifest 序列化失败: {err}")))?;
-        std::fs::write(&path, bytes).map_err(|err| {
+
+        // 入位：只有到这里才碰已发布的键。
+        for shard in &manifest.shards {
+            let from = self.staging_dir().join(format!("{}.ndjson", shard.id));
+            let to = object_dir.join(format!("{}.ndjson", shard.id));
+            std::fs::rename(&from, &to).map_err(|err| {
+                HarvestError::new(
+                    crate::error::ErrorClass::Other,
+                    format!(
+                        "发布分片 {} → {}: {err}（旧 manifest 未动）",
+                        from.display(),
+                        to.display()
+                    ),
+                )
+            })?;
+        }
+        // manifest 最后生效：在此之前，消费方看到的仍是上一批。
+        std::fs::rename(&tmp, &manifest_path).map_err(|err| {
             HarvestError::new(
                 crate::error::ErrorClass::Other,
-                format!("写 manifest {}: {err}", path.display()),
+                format!("更换 manifest {}: {err}", manifest_path.display()),
             )
         })?;
-        Ok((path, manifest))
+
+        // 本批分片数变少时，旧的高序号分片会变成孤儿：manifest 是权威，删掉它们。
+        prune_stale_shards(&object_dir, &manifest.shards);
+        // 暂存目录里的分片已全部搬走；残留的空目录顺手清掉（失败不影响结果）。
+        let _ = std::fs::remove_dir_all(self.staging_dir());
+
+        Ok((manifest_path, manifest))
+    }
+}
+
+/// 没有正常收尾就退出时清理暂存目录（成功发布后目录已空，是空操作）。
+impl Drop for CostShardWriter {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(self.staging_dir());
+    }
+}
+
+/// 删除不再被 manifest 引用的分片文件（只动 `NNNN.ndjson` 形态的名字）。
+fn prune_stale_shards(object_dir: &Path, shards: &[CostShard]) {
+    let keep: std::collections::BTreeSet<&str> =
+        shards.iter().map(|shard| shard.id.as_str()).collect();
+    let Ok(entries) = std::fs::read_dir(object_dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        let Some(id) = name.strip_suffix(".ndjson") else {
+            continue;
+        };
+        if id.len() != 4 || !id.chars().all(|c| c.is_ascii_digit()) || keep.contains(id) {
+            continue;
+        }
+        if let Err(err) = std::fs::remove_file(entry.path()) {
+            crate::redact::warn(format!(
+                "清理孤儿分片 {} 失败: {err}",
+                entry.path().display()
+            ));
+        }
     }
 }
 
@@ -476,10 +604,6 @@ pub fn month_histogram(details: &[CostDetail]) -> BTreeMap<String, u64> {
     }
     hist
 }
-
-/// 只是为了让 `Path` 在文档里有个引用点（避免 unused import 警告）。
-#[allow(dead_code)]
-fn _assert_path_used(_: &Path) {}
 
 #[cfg(test)]
 mod tests {
@@ -548,20 +672,34 @@ mod tests {
 
         // 一个已知的 0 → "0"。
         let mut zero = DecimalSum::default();
-        zero.add(Some("0"));
+        zero.add(Some("0")).unwrap();
         assert_eq!(zero.finish().as_deref(), Some("0"));
 
         // 退款为负。
         let mut refund = DecimalSum::default();
-        refund.add(Some("10.5"));
-        refund.add(Some("-3.25"));
+        refund.add(Some("10.5")).unwrap();
+        refund.add(Some("-3.25")).unwrap();
         assert_eq!(refund.finish().as_deref(), Some("7.25"));
 
         // 8 位小数的组件金额不能丢精度。
         let mut cents = DecimalSum::default();
-        cents.add(Some("0.97000000"));
-        cents.add(Some("0.03000000"));
+        cents.add(Some("0.97000000")).unwrap();
+        cents.add(Some("0.03000000")).unwrap();
         assert_eq!(cents.finish().as_deref(), Some("1"));
+    }
+
+    #[test]
+    fn unparseable_amounts_are_errors_not_zero() {
+        // 金额读不出来就是错误：静默当成 0 等于把「确认为零」写进了账单。
+        for bad in ["+1.5", "1e3", "1,234.00", "１.５", "1.2.3"] {
+            let mut sum = DecimalSum::default();
+            assert!(sum.add(Some(bad)).is_err(), "{bad} 必须报错而不是归零");
+            assert_eq!(sum.finish(), None, "报错后不能留下一个虚假的 0");
+        }
+        // 空串/空白仍然是「未知」，不报错也不记 known。
+        let mut blank = DecimalSum::default();
+        blank.add(Some("  ")).unwrap();
+        assert_eq!(blank.finish(), None);
     }
 
     #[test]
@@ -569,7 +707,7 @@ mod tests {
         // 1000 个 0.00000001 → 0.00001；浮点累加这里会给出 1.0000002e-5 之类的脏值。
         let mut sum = DecimalSum::default();
         for _ in 0..1000 {
-            sum.add(Some("0.00000001"));
+            sum.add(Some("0.00000001")).unwrap();
         }
         assert_eq!(sum.finish().as_deref(), Some("0.00001"));
     }
@@ -663,6 +801,122 @@ mod tests {
         let raw = std::fs::read(&manifest_path).unwrap();
         let back: CostManifest = serde_json::from_slice(&raw).unwrap();
         assert_eq!(back, manifest);
+
+        // 发布完成后暂存目录必须清干净（不留下一份重复的字节）。
+        let staging: Vec<_> =
+            std::fs::read_dir(dir.path().join("cost/DEV-X4/TENCENT_CLOUD/CHARGE/2026/10"))
+                .unwrap()
+                .flatten()
+                .filter(|entry| {
+                    entry
+                        .file_name()
+                        .to_str()
+                        .is_some_and(|name| name.starts_with(".staging-"))
+                })
+                .collect();
+        assert!(staging.is_empty(), "暂存目录应在发布后清掉");
+    }
+
+    #[test]
+    fn failed_batch_never_touches_the_published_shards() {
+        let dir = tempfile::tempdir().unwrap();
+        let range = range(CostBasis::Charge, (2026, 10, 1), (2026, 10, 31));
+        let shard_path = dir
+            .path()
+            .join("cost/DEV-X4/TENCENT_CLOUD/CHARGE/2026/10/0001.ndjson");
+        let manifest_path = dir
+            .path()
+            .join("cost/DEV-X4/TENCENT_CLOUD/CHARGE/2026/10/manifest.json");
+
+        // 第一批：2 行，正常发布。
+        let mut first = CostShardWriter::new(
+            dir.path(),
+            range.clone(),
+            "CNY",
+            PeriodSource::CloudApi,
+            "t1",
+            "batch-1",
+        )
+        .with_rows_per_shard(2);
+        first.push(detail("1")).unwrap();
+        first.push(detail("1")).unwrap();
+        let (_, first_manifest) = first.finish().unwrap();
+        let published = std::fs::read(&shard_path).unwrap();
+        let published_manifest = std::fs::read(&manifest_path).unwrap();
+        assert_eq!(first_manifest.shards[0].sha256, sha(&published));
+
+        // 第二批：抓到一半失败（只 push、不 finish），已发布的那份必须一字未变。
+        // 注意 rows_per_shard=1，push 就会立刻落暂存片，所以这不是「在内存里」的情况。
+        let mut second = CostShardWriter::new(
+            dir.path(),
+            range,
+            "CNY",
+            PeriodSource::CloudApi,
+            "t2",
+            "batch-2",
+        )
+        .with_rows_per_shard(1);
+        second.push(detail("999")).unwrap();
+        drop(second);
+
+        assert_eq!(
+            std::fs::read(&shard_path).unwrap(),
+            published,
+            "抓取失败不能改写已发布分片的字节"
+        );
+        assert_eq!(
+            std::fs::read(&manifest_path).unwrap(),
+            published_manifest,
+            "抓取失败不能改写已发布的 manifest"
+        );
+        let staging_left = std::fs::read_dir(shard_path.parent().unwrap())
+            .unwrap()
+            .flatten()
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_str()
+                    .is_some_and(|name| name.starts_with(".staging-"))
+            })
+            .count();
+        assert_eq!(staging_left, 0, "失败批次的暂存分片应当被清掉");
+    }
+
+    #[test]
+    fn republishing_prunes_shards_the_new_manifest_does_not_list() {
+        let dir = tempfile::tempdir().unwrap();
+        let range = range(CostBasis::Charge, (2026, 10, 1), (2026, 10, 31));
+        let month_dir = dir.path().join("cost/DEV-X4/TENCENT_CLOUD/CHARGE/2026/10");
+        let writer = |batch: &str, rows: usize| {
+            let mut writer = CostShardWriter::new(
+                dir.path(),
+                range.clone(),
+                "CNY",
+                PeriodSource::CloudApi,
+                "t",
+                batch,
+            )
+            .with_rows_per_shard(1);
+            for _ in 0..rows {
+                writer.push(detail("1")).unwrap();
+            }
+            writer
+        };
+
+        writer("batch-1", 3).finish().unwrap();
+        assert!(month_dir.join("0003.ndjson").exists());
+
+        let (_, manifest) = writer("batch-2", 1).finish().unwrap();
+        assert_eq!(manifest.shards.len(), 1);
+        assert!(month_dir.join("0001.ndjson").exists());
+        assert!(
+            !month_dir.join("0002.ndjson").exists() && !month_dir.join("0003.ndjson").exists(),
+            "旧批次多出来的分片不能留在范围目录里"
+        );
+    }
+
+    fn sha(bytes: &[u8]) -> String {
+        hex::encode(Sha256::digest(bytes))
     }
 
     #[test]
@@ -694,7 +948,7 @@ mod tests {
             "t",
             "b",
         )
-        .with_rows_per_shard(MAX_RANGE_ROWS as u64);
+        .with_rows_per_shard(MAX_RANGE_ROWS);
         for i in 0..MAX_RANGE_ROWS {
             writer
                 .push(detail("0"))

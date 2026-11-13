@@ -51,10 +51,15 @@ wist-harvest cost --config ... --source ... --day 2026-10-15 --output-dir /data/
 <output_dir>/cost/{tenant}/{vendor}/{cost_basis}/{yyyy}/{MM}/manifest.json
 ```
 
+发布顺序是**先暂存、后入位**：抓取期间分片只落在同目录的 `.staging-<batch_id>/`，
+完整抓完才 `rename` 进最终键，manifest 最后原子替换。所以**抓取失败永远不会改写
+已发布的字节**（旧 manifest 与旧分片保持有效）；同一范围重发若分片数变少，
+旧的高序号分片会被清掉，不留孤儿。
+
 三条不能松的口子：分片**不可变**（补采 = 新 `batch_id`）、金额全程十进制字符串
-（`DecimalSum`，不碰浮点）、`null`（未知）与 `"0"`（确认为零）严格区分。
-归日用**账单归属日 `BillDay`**，不是 `PayTime` —— 月底结算跨零点，按付款时刻归日
-会把 10 月的行推到 11 月，而 11 月的查询不包含它们。
+（`DecimalSum`，不碰浮点；**解析不出来就报错**，绝不静默归零）、`null`（未知）与
+`"0"`（确认为零）严格区分。归日用**账单归属日 `BillDay`**，不是 `PayTime` —— 月底结算跨零点，
+按付款时刻归日会把 10 月的行推到 11 月，而 11 月的查询不包含它们。
 
 ## 目录
 
@@ -173,13 +178,21 @@ spool/state 目录可写、数据平面端点可解析、是否有可续跑 spoo
 
 1. **不完整不发**：`Aborted` → 零帧。发送只在 `Verified` 之后发生，
    `run::fill_and_publish` 是唯一调用点。
-2. **空 ≠ 失败**：某类型 0 行时，除"范围完整 + 云端确实为空 + `service.allow_empty=true"`
-   三者同时成立外，一律 `Aborted`。
-3. **重放幂等**：同一 spool 重发同一 `snap_id`，帧体逐字节一致
+2. **空 ≠ 失败**：某类型 0 行时，除"范围完整 + 云端确实为空 + `service.allow_empty`
+   放行该类型"三者同时成立外，一律 `Aborted`。`allow_empty` 可以写 `true`/`false`，
+   也可以写 `["EIP"]` 这样的类型列表——别为了养一个空类型把其余三类的保护一起关掉。
+3. **少一类就不声称账号级全集**：`coverage.scope = account` 需要「账号可见地域全集」
+   **且四类资产全采**。关掉任一 `assets.<type>` 时自动降为 `partial`（下游只 upsert、
+   不判死），否则空数组会被当成"这类资产都没了"的退役证据。
+4. **重放幂等**：同一 spool 重发同一 `snap_id`，帧体逐字节一致
    （`collected_at` 固定记录在 manifest 里，不是每次取当前时间）。
-4. **续跑**：manifest 记录每个工作项的 `completed`，重启后只重抓失败项；
-   未完成项整项重抓（`begin_item` 先截断文件）。
-5. **凭据零泄漏**：`secret_id`/`secret_key` 真实值注册到全局脱敏器，
+5. **续跑**：manifest 记录每个工作项的 `completed`，重启后只重抓失败项；
+   未完成项整项重抓（`begin_item` 先截断文件）。**计划变了或超过
+   `service.max_resume_age_ms`（默认 24h）就放弃旧 spool**（状态 `Abandoned`，保留供诊断），
+   开新 `snap_id` 重采——否则一份永远续不完的旧 spool 会让采集器永不发布。
+6. **读文件本身**：组装前核对每个工作项的实际行数与 manifest 一致，文件缺失/行数不符
+   一律 `Aborted`（只信 manifest 会把"文件没了"发成"这类资产 0 行"）。
+7. **凭据零泄漏**：`secret_id`/`secret_key` 真实值注册到全局脱敏器，
    日志/报告/manifest 失败原因都过一遍；云 API 错误体裁到 `Code`/`Message`/`RequestId`。
 
 ## spool 目录
@@ -208,8 +221,9 @@ spool/state 目录可写、数据平面端点可解析、是否有可续跑 spoo
    同一秒内的两轮会撞目录名，因此新一轮会追加 `-1`/`-2` 后缀（`Spool::next_available_snap_id`）。
 3. **`collected_at` 存在 manifest 里。** 为了"同 `snap_id` 重放逐字节一致"，
    观测时间在建 spool 时固定，续跑/重发沿用，而不是每次取 `now`。
-4. **帧格式 4 字节大端长度前缀。** 设计只写了 `framing="len"`，字节序/宽度需与
-   warp-parse 侧确认；这里选了 BE u32 并集中在 `harvest_warp::frame`，改一处即可。
+4. **帧格式是 ASCII 十进制长度前缀**（`{"<字节数>"} {正文}`），不是二进制前缀。
+   这是按 `wist-agentd` 的 `TcpFraming::Len` 与真实 wparse 验证过的：早先按 BE u32 实现时
+   帧看起来"发出去了"，引擎却一条也收不到。集中在 `harvest_warp::frame`，改一处即可。
 5. **`DescribeVpcs`/`DescribeSubnets` 的 `Limit`/`Offset` 用字符串。** 这是按交接
    文档的既有实现沿用的；腾讯云官方接口签名是整型。**接真实账号前必须验一次**，
    若被拒绝，把 `PageSpec::limit_as_string` 改成 `false` 即可（一处 switch）。
@@ -218,7 +232,8 @@ spool/state 目录可写、数据平面端点可解析、是否有可续跑 spoo
 7. **spool 用同步文件 IO。** 每页写一次、量级可控；没有改成 `spawn_blocking`。
 8. **`concurrency` 只解析不生效。** P0 顺序抓取，字段留着以免下一阶段改配置结构。
 9. **`allow_empty` 按类型判定。** 某类型整体 0 行即视为可疑（需要显式开关），
-   而不是按整帧 0 行判断——这样"少采了一类"不会静默变成"这类资产没了"。
+   而不是按整帧 0 行判断——这样"少采了一类"不会静默变成"这类资产没了"。开关本身也
+   可以只给某几类（`allow_empty = ["EIP"]`），不必为了一类牺牲其余三类的保护。
 10. **TLS 只跑到配置构建层。** 测试用明文 TCP 覆盖帧协议与 ACK 语义；
     mTLS 握手路径需要真实证书，P0 没有做端到端测试。
 11. **调度时区固定 `+08:00`。** `--run-at` 解释为 Asia/Shanghai 挂钵时间；

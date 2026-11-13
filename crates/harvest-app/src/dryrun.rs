@@ -54,7 +54,7 @@ pub fn run(config_path: &Path, source_path: &Path) -> i32 {
             "max_frame_bytes": svc.service.max_frame_bytes,
             "max_response_bytes": svc.service.max_response_bytes,
             "request_timeout_ms": svc.service.request_timeout_ms,
-            "allow_empty": svc.service.allow_empty,
+            "allow_empty": svc.service.allow_empty.describe(),
             "concurrency": svc.service.concurrency,
         },
         "retry": {

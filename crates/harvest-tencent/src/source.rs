@@ -14,7 +14,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use harvest_core::config::{RegionsSpec, ServiceConfig, SourceConfig};
+use harvest_core::config::{AllowEmpty, RegionsSpec, ServiceConfig, SourceConfig};
 use harvest_core::error::{ErrorClass, HarvestError};
 use harvest_core::model::{AssetType, Coverage, CoverageScope, Vendor};
 use harvest_core::ratelimit::{RateLimiter, RateSpec};
@@ -70,7 +70,7 @@ pub struct TencentSource {
     regions: Vec<RegionEntry>,
     projects: BTreeMap<String, String>,
     page_size: u64,
-    allow_empty: bool,
+    allow_empty: AllowEmpty,
     /// 地域是不是 `auto` 解出来的（账号可见地域全集）。
     ///
     /// 它决定这一帧能不能声明 `coverage.scope = account`：手写地域子集时，
@@ -130,7 +130,7 @@ impl TencentSource {
             regions: Vec::new(),
             projects: BTreeMap::new(),
             page_size: svc.service.page_size,
-            allow_empty: svc.service.allow_empty,
+            allow_empty: svc.service.allow_empty.clone(),
         };
 
         source.regions = source.resolve_regions().await?;
@@ -167,9 +167,8 @@ impl TencentSource {
     /// 与资产采集分开：成本不走 spool / 数据平面，也不吃 `verify` 那套「帧完整性」
     /// （分片自身的 `sha256` + 行数就是它的完整性证据）。
     ///
-    /// `billing_account_uin` 从运行时的 `--account` 或账号解析结果里取，见
-    /// [`TencentSource::account_key`]：`tencent:100041355715` 取后段，
-    /// 因为账单接口的口径是 UIN，不是 `vendor:uin` 组合键。
+    /// `billing_account_uin` 必须由 `sources.d` 里显式配置：账单接口按 UIN 记账，
+    /// 跟凭据里的 SecretId 没有推导关系，不能猜（见 `harvest-app::cost`）。
     pub async fn fetch_cost<F>(
         &self,
         range: &harvest_core::cost::CostRange,
@@ -455,16 +454,22 @@ impl Source for TencentSource {
     }
 
     fn verify(&self, manifest: &Manifest) -> Result<(), HarvestError> {
-        harvest_core::integrity::verify_manifest(manifest, self.allow_empty).map(|_| ())
+        harvest_core::integrity::verify_manifest(manifest, &self.allow_empty).map(|_| ())
     }
 
-    /// 只有 `regions = "auto"`（`DescribeRegions` 拿账号可见地域全集）才敢声称账号级全量。
+    /// 只有 `regions = "auto"`（`DescribeRegions` 拿账号可见地域全集）**且四类资产全采**
+    /// 才敢声称账号级全量。
     ///
     /// 手写地域子集时，「某台机不在结果里」完全可能是「它在另一个地域」——
     /// 那种帧只能 `partial`，否则下游会把采集范围当销毁证据。
+    ///
+    /// 关掉某一类（`assets.<type> = false`）同理：账号级全集的替换语义不含类型，
+    /// 少一类就变成子集。这条收敛在 `run::fill_and_publish` 里也会按实际计划再做一次，
+    /// 这里写清楚是为了让 `Source` 自己也不撒谎。
     fn coverage(&self) -> Coverage {
+        let all_types = self.cfg.enabled_types().len() == AssetType::ALL.len();
         Coverage {
-            scope: if self.regions_auto {
+            scope: if self.regions_auto && all_types {
                 CoverageScope::Account
             } else {
                 CoverageScope::Partial

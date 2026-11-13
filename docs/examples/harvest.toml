@@ -18,7 +18,11 @@ request_timeout_ms = 30000
 # P0 顺序采集，留字段避免下一阶段改配置结构。
 concurrency = 1
 # 是否允许"云端确实为空"时发空数组快照。默认 false：空 ≠ 失败。
+# 也可以只给某几类（例如 allow_empty = ["EIP"]），其余类型仍受保护。
 allow_empty = false
+# 可续跑 spool 的最大年龄（毫秒）。默认 24h；0 = 不限制。
+# 超龄/计划变更的旧 spool 会被标成 Abandoned（保留供诊断）并开新 snap_id。
+max_resume_age_ms = 86400000
 
 [retry]
 # 限流 / 5xx / 网络可重试；鉴权 / 参数 / 响应超限不重试。

@@ -91,13 +91,14 @@ impl WarpSink {
             .connector
             .as_ref()
             .expect("非明文模式必然已构建 TLS connector");
-        let tls: TlsStream<TcpStream> =
-            connector
-                .connect(server_name.clone(), tcp)
-                .await
-                .map_err(|err| {
-                    HarvestError::new(ErrorClass::Network, format!("TLS 握手失败: {err}"))
-                })?;
+        // 握手也要超时：对端 TCP 通了但 TLS 卡住时，不能把整轮采集挂死在这里。
+        let tls: TlsStream<TcpStream> = tokio::time::timeout(
+            self.connect_timeout,
+            connector.connect(server_name.clone(), tcp),
+        )
+        .await
+        .map_err(|_| HarvestError::new(ErrorClass::Timeout, "TLS 握手超时"))?
+        .map_err(|err| HarvestError::new(ErrorClass::Network, format!("TLS 握手失败: {err}")))?;
         Ok(Box::new(tls))
     }
 

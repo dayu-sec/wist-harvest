@@ -25,7 +25,8 @@ fn to_chrono(duration: Duration) -> ChronoDuration {
 pub enum ScheduleMode {
     /// 每天 `HH:MM`（Asia/Shanghai）触发。
     Daily { at: NaiveTime },
-    /// 固定间隔触发。间隔从**上一轮结束**起算，所以慢轮次不会堆积。
+    /// 固定间隔触发。间隔从**触发时刻**起算；上一轮还没结束就跳过本次触发，
+    /// 所以慢轮次不会堆积，也不会把后续节奏越拖越晚。
     Interval { every: Duration },
 }
 
@@ -524,7 +525,7 @@ mod tests {
     }
 
     #[test]
-    fn interval_mode_spaces_rounds_from_completion() {
+    fn interval_mode_next_run_is_one_interval_after_the_trigger() {
         let cfg = SchedulerConfig {
             mode: ScheduleMode::Interval {
                 every: Duration::from_secs(3600),
