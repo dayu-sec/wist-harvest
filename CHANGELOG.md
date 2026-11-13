@@ -3,6 +3,14 @@
 本文件记录 `wist-harvest` 的所有重要变更。格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.1.1-alpha] - 2026-11-13
+
+除版本号外**没有行为变化**。这次发布是为了把上一版没走到的制品路径走一遍：
+构建与推送镜像用的 GitHub Actions 已从 Node 20 迁到 Node 24
+（`v0.1.0-alpha` 发布时这三个 action 都报了弃用告警）。镜像里的 `wist-harvest` 自身行为不变。
+
+用着 `v0.1.0-alpha` 的站点**不必**跟升级；下一次有功能变更时一起走就行。
+
 ## [0.1.0-alpha] - 2026-11-13
 
 首个实际发布的版本。骨架写完时只写了 changelog 标题、没打 tag，所以这一次把骨架、
