@@ -9,7 +9,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.3.0" #@gxl:set(version)
+version = "0.4.0" #@gxl:set(version)
 edition = "2024"
 publish = false
 license = "Apache-2.0"

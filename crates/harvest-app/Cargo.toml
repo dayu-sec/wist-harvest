@@ -21,6 +21,7 @@ harvest-warp.workspace = true
 chrono.workspace = true
 clap.workspace = true
 serde_json.workspace = true
+reqwest.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "signal", "time", "sync"] }
 
 [dev-dependencies]

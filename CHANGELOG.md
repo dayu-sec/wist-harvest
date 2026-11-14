@@ -3,6 +3,34 @@
 本文件记录 `wist-harvest` 的所有重要变更。格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.4.0-alpha] - 2026-11-13
+
+**采集开关可以自拉了：`[control]` 轮询中心配置（不经 gwlinkd）。**
+
+「开不开」归中心（控制逻辑在中心），但执行不必经过本机代理 —— 采集器定时问一句就行，
+gwlinkd 不需要认识 harvest。开关**不需要重启容器**，下一拍即生效。
+
+```toml
+[control]
+url = "http://gateway:3001/internal/harvest"   # 空 = 不轮询（用 [service] enabled）
+poll_interval_ms = 30000                       # 下限 1000
+
+[control.credential]
+bearer = { file = "/secrets/sec-value.yml", field = "harvest_control_token" }
+```
+
+契约 v1：`GET <url>` + `Authorization: Bearer <token>` → `200 {"enabled": true}`（`revision` 可选）。
+
+失败语义刻意选的是 **fail-closed + 沿用上一拍**：
+
+- 配了 `[control]` 时**首拍之前不采** —— 否则容器刚起来那一轮可能抢在轮询之前跑掉，
+  等于「中心说关、实际采了一次」；
+- 首拍失败（中心不可达 / 500 / 契约不符）→ 不采，日志一条 warn；
+- 拿到过之后中心抖动 → 沿用上一拍的值，不因为一次失败就停采或放开；
+- 本地 `[service] enabled = false` 仍然是**硬关**，远端说 true 也不采。
+
+切换日志只在**状态翻转**时打一次（不逐轮刷）。`once` / `cost` 不参与该开关（手工动作）。
+
 ## [0.3.0-alpha] - 2026-11-13
 
 **新增运行时开关 `[service] enabled`（默认 true）。**

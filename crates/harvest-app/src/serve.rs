@@ -22,10 +22,19 @@ use tokio::task::JoinHandle;
 
 pub use crate::round::RoundOutcome;
 
+/// 中心配置轮询计划（`[control]` 有 url 时才建）。
 #[derive(Debug, Clone)]
+pub struct ControlPlan {
+    pub url: String,
+    pub token: Option<String>,
+    pub poll_interval: Duration,
+}
+
 pub struct ServeOptions {
-    /// 采集开关：`false` 时保持常驻但不调度（管理面关采集时容器不必销毁）。
+    /// 本地采集开关：`false` 时保持常驻但不调度（**硬关**，远端说 true 也不采）。
     pub enabled: bool,
+    /// 中心配置轮询；`None` = 不轮询（用本地 `enabled`）。
+    pub control: Option<ControlPlan>,
     pub scheduler: SchedulerConfig,
     /// 是否续跑未完成的 spool。
     pub resume: bool,
@@ -39,6 +48,7 @@ impl Default for ServeOptions {
     fn default() -> Self {
         Self {
             enabled: true,
+            control: None,
             scheduler: SchedulerConfig::default(),
             resume: true,
             shutdown_grace: Duration::from_secs(30),
@@ -134,8 +144,70 @@ where
         crate::serve::rfc3339(scheduler.next_scheduled())
     ));
 
+    // 远端开关：本地 `enabled` 是硬关，远端只能「关」不能越过本地「开」。
+    //
+    // 配了 `[control]` 时**先按关处理**，等第一拍中心答复再放行：否则容器刚起来那一轮
+    // （`--now` / 到点）可能抢在第一次轮询之前跑掉，等于「中心说关、实际采了一次」。
+    // 中心一直不可达 = 一直不采（fail-closed，日志里有 warn）。
+    let control_configured = opts.control.is_some();
+    let known = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(!control_configured));
+    let effective = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
+        opts.enabled && !control_configured,
+    ));
+    if let Some(plan) = opts.control.clone() {
+        let effective = std::sync::Arc::clone(&effective);
+        let known = std::sync::Arc::clone(&known);
+        let local_enabled = opts.enabled;
+        tokio::spawn(async move {
+            let client = match crate::control::client(Duration::from_secs(5)) {
+                Ok(client) => client,
+                Err(err) => {
+                    redact::warn(format!(
+                        "{err}：中心开关不可用，沿用本地 enabled={local_enabled}"
+                    ));
+                    return;
+                }
+            };
+            let mut last_remote: Option<bool> = None;
+            let mut failing = false;
+            loop {
+                match crate::control::fetch_state(&client, &plan.url, plan.token.as_deref()).await {
+                    Ok(state) => {
+                        if failing {
+                            redact::info("中心配置已恢复");
+                            failing = false;
+                        }
+                        if last_remote != Some(state.enabled) {
+                            redact::info(format!(
+                                "中心配置 enabled={}（revision={:?}）：本机生效={}",
+                                state.enabled,
+                                state.revision,
+                                local_enabled && state.enabled
+                            ));
+                            last_remote = Some(state.enabled);
+                        }
+                        effective.store(
+                            local_enabled && state.enabled,
+                            std::sync::atomic::Ordering::SeqCst,
+                        );
+                        known.store(true, std::sync::atomic::Ordering::SeqCst);
+                    }
+                    Err(err) => {
+                        // 只在第一次失败时说一句：中心抖一下不该把日志刷满，也不该改变本机行为。
+                        if !failing {
+                            redact::warn(format!("{err}（沿用上一拍的值）"));
+                            failing = true;
+                        }
+                    }
+                }
+                tokio::time::sleep(plan.poll_interval).await;
+            }
+        });
+    }
+
     let mut stats = ServeStats::default();
     let mut inflight: Option<Inflight> = None;
+    let mut disabled_logged = false;
     tokio::pin!(shutdown);
 
     loop {
@@ -181,6 +253,18 @@ where
                         ));
                     }
                     WakeOutcome::Start(trigger) => {
+                        if !effective.load(std::sync::atomic::Ordering::SeqCst) {
+                            // 中心把采集关了：照常推进调度，但不真跑。只喊一次，不逐轮刷。
+                            stats.skipped += 1;
+                            if !disabled_logged {
+                                redact::warn(
+                                    "采集已关闭（中心配置 enabled=false）：跳过触发，等待下一拍",
+                                );
+                                disabled_logged = true;
+                            }
+                            continue;
+                        }
+                        disabled_logged = false;
                         let cancel = CancelFlag::new();
                         let future = run_round(cancel.clone());
                         let started_at = Utc::now();

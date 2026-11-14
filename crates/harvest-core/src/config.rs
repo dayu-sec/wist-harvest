@@ -263,6 +263,47 @@ pub struct ServiceConfig {
     pub rate: RateSettings,
     #[serde(default)]
     pub sink: SinkSettings,
+    /// 中心配置轮询（自拉，不经 gwlinkd）：`url` 为空 = 不轮询。
+    #[serde(default)]
+    pub control: ControlSettings,
+}
+
+/// 中心配置端点（`harvest.enabled` 的真相在中心）。
+///
+/// 为什么是**自拉**而不是中心下发命令：开关属于中心控制逻辑，但执行不必经过 gwlinkd ——
+/// 采集器定时问一句就行，本地不用重启、gwlinkd 也不用认识 harvest。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ControlSettings {
+    /// 端点：`GET <url>`，带 `Authorization: Bearer <token>`，返回 `{"enabled": true|false}`。
+    #[serde(default)]
+    pub url: String,
+    /// 轮询间隔（毫秒，下限 1000）。
+    #[serde(default = "default_control_poll_ms")]
+    pub poll_interval_ms: u64,
+    /// 访问端点用的凭据表：`bearer = { file = "/secrets/sec-value.yml", field = "..." }`。
+    #[serde(default)]
+    pub credential: CredentialTable,
+}
+
+impl Default for ControlSettings {
+    fn default() -> Self {
+        Self {
+            url: String::new(),
+            poll_interval_ms: default_control_poll_ms(),
+            credential: CredentialTable::default(),
+        }
+    }
+}
+
+impl ControlSettings {
+    pub fn is_enabled(&self) -> bool {
+        !self.url.trim().is_empty()
+    }
+
+    pub fn poll_interval(&self) -> std::time::Duration {
+        std::time::Duration::from_millis(self.poll_interval_ms.max(1000))
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -362,6 +403,10 @@ impl AllowEmpty {
 
 fn default_enabled() -> bool {
     true
+}
+
+fn default_control_poll_ms() -> u64 {
+    30_000
 }
 
 fn default_spool_dir() -> PathBuf {
@@ -1114,6 +1159,24 @@ secret_key = { env = "B" }
 
         let off = ServiceConfig::parse("[service]\nenabled = false\n").unwrap();
         assert!(!off.service.enabled);
+    }
+
+    #[test]
+    fn control_settings_default_to_off_and_can_be_configured() {
+        let default = ServiceConfig::parse("").unwrap();
+        assert!(!default.control.is_enabled());
+        assert_eq!(default.control.poll_interval_ms, 30_000);
+
+        let raw =
+            "[control]\nurl = \"http://gateway:3001/internal/harvest\"\npoll_interval_ms = 5000\n";
+        let cfg = ServiceConfig::parse(raw).unwrap();
+        assert!(cfg.control.is_enabled());
+        assert_eq!(cfg.control.poll_interval().as_millis(), 5000);
+
+        // 下限 1s：写 10ms 也不会把中心打爆。
+        let fast =
+            ServiceConfig::parse("[control]\nurl = \"http://x\"\npoll_interval_ms = 10\n").unwrap();
+        assert_eq!(fast.control.poll_interval().as_millis(), 1000);
     }
 
     #[test]

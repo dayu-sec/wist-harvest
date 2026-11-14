@@ -171,18 +171,37 @@ fn main() {
                     None => Duration::from_secs(30),
                 };
 
-                // `enabled` 是运行时开关（管理面关采集时进程常驻但不调度）。
+                // `enabled` / `[control]` 是运行时开关（中心关采集时进程常驻但不调度）。
                 // 这里单独读一次配置：读不出来要在启动期就明确失败，而不是等到第一轮。
-                let enabled = match harvest_core::config::ServiceConfig::load(&config) {
-                    Ok(service) => service.service.enabled,
+                let service = match harvest_core::config::ServiceConfig::load(&config) {
+                    Ok(service) => service,
                     Err(err) => {
                         eprintln!("采集配置不可用：{err}");
                         return 3;
                     }
                 };
+                let enabled = service.service.enabled;
+                let control = if service.control.is_enabled() {
+                    // token 可选（内网端点可能不校验）；读到就注册进脱敏器，永不落日志。
+                    let token = match service.control.credential.get("bearer") {
+                        Ok(secret) => {
+                            harvest_core::redact::register_secret(secret.expose());
+                            Some(secret.expose().to_string())
+                        }
+                        Err(_) => None,
+                    };
+                    Some(harvest_app::serve::ControlPlan {
+                        url: service.control.url.trim().to_string(),
+                        token,
+                        poll_interval: service.control.poll_interval(),
+                    })
+                } else {
+                    None
+                };
 
                 let opts = harvest_app::serve::ServeOptions {
                     enabled,
+                    control,
                     scheduler,
                     resume: !fresh,
                     shutdown_grace: grace,
