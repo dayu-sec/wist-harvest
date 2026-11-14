@@ -306,13 +306,13 @@ async fn replay_same_snap_id_is_byte_identical() {
     assert_eq!(payload["assets"]["CLOUD_HOST"].as_array().unwrap().len(), 4);
 }
 
-/// 从线上记录里取快照正文：`<JSON 头>CLOUDINV:<正文>`（无 NUL）。
+/// 从线上记录里取快照正文：`<JSON 头>DSNAP:<正文>`（无 NUL）。
 fn wire_body(bytes: &[u8]) -> serde_json::Value {
     let symbol = harvest_core::wire::WIRE_SYMBOL.as_bytes();
     let at = bytes
         .windows(symbol.len())
         .position(|w| w == symbol)
-        .expect("记录里必须有 CLOUDINV: 符号");
+        .expect("记录里必须有 DSNAP: 符号");
     let body = &bytes[at + symbol.len()..];
     serde_json::from_slice(body).expect("正文应是合法 JSON")
 }

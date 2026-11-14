@@ -330,12 +330,12 @@ async fn successful_run_sends_exactly_one_frame() {
     let frames = server.wait_frames(1).await;
     assert_eq!(frames.len(), 1);
 
-    // 线上记录 = `<JSON 头>CLOUDINV:<正文>\0`；快照在正文里。
+    // 线上记录 = `<JSON 头>DSNAP:<正文>`；快照在正文里。
     let symbol = harvest_core::wire::WIRE_SYMBOL.as_bytes();
     let at = frames[0]
         .windows(symbol.len())
         .position(|w| w == symbol)
-        .expect("记录里必须有 CLOUDINV: 符号");
+        .expect("记录里必须有 DSNAP: 符号");
     let payload: Value = serde_json::from_slice(&frames[0][at + symbol.len()..]).unwrap();
     assert_eq!(payload["snap_id"], json!(outcome.snap_id));
 }

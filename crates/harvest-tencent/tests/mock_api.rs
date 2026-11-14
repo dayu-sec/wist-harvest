@@ -370,13 +370,13 @@ async fn inventory_group_end_to_end() {
 
     let frames = sink.frames.lock().unwrap();
     assert_eq!(frames.len(), 1);
-    // 线上记录是 `<JSON 头>CLOUDINV:<正文>\0`，正文才是快照本身。
+    // 线上记录是 `<JSON 头>DSNAP:<正文>`，正文才是快照本身。
     let bytes = &frames[0].bytes;
     let symbol = harvest_core::wire::WIRE_SYMBOL.as_bytes();
     let at = bytes
         .windows(symbol.len())
         .position(|w| w == symbol)
-        .expect("记录里必须有 CLOUDINV: 符号");
+        .expect("记录里必须有 DSNAP: 符号");
     let payload: Value = serde_json::from_slice(&bytes[at + symbol.len()..]).unwrap();
 
     assert_eq!(payload["schema_native"], json!("wist.harvest.snapshot.v1"));
@@ -600,7 +600,7 @@ fn body_of(frame: &CompleteSnapshot) -> Value {
         .bytes
         .windows(symbol.len())
         .position(|w| w == symbol)
-        .expect("记录里必须有 CLOUDINV: 符号");
+        .expect("记录里必须有 DSNAP: 符号");
     serde_json::from_slice(&frame.bytes[at + symbol.len()..]).expect("正文是 JSON")
 }
 

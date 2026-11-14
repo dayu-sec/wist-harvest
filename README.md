@@ -4,8 +4,13 @@
 完整性校验 → 一个采集组一条完整快照帧写进数据平面。
 
 ```
-wist-harvest ──原生快照帧──► warp-parse ──atlas.in.<family>.v1──► wist-atlas
+wist-harvest ──DSNAP 快照帧（schema=atlas.in.inventory.v1）──► warp-parse ──► wist-atlas
 ```
+
+帧信封与 `wist-agentd` 的原文快照**完全一致**（`{schema,agent,ts,seq} DSNAP: <正文>`）：
+云资产就是快照，数据面不需要为采集器多一条 WPL / OML / sink 分组。
+`schema` 是**入口路由键**（atlas 按它分发到云资产适配器），不是采集器自己的版本号 ——
+采集器的原生 schema（`wist.harvest.snapshot.v1`）在正文里，供下游排障。
 
 设计依据：[`../wist-harvest-设计说明.md`](../wist-harvest-设计说明.md)（权威）与
 [`../云资产与成本采集说明.md`](../云资产与成本采集说明.md) §2/§3。

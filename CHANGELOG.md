@@ -3,6 +3,28 @@
 本文件记录 `wist-harvest` 的所有重要变更。格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.5.0-alpha] - 2026-11-13
+
+**线上记录改用 `DSNAP:` 信封（wire 变更）。**
+
+原来自己造了一个 `CLOUDINV:` 帧标记，只为让数据面能分流。但云资产快照**就是快照** ——
+平台已有 `DSNAP:` 信封，而 atlas 的写入端点本来就按记录里的 `schema` 分发
+（`atlas.in.inventory.v1` → 云资产适配器），根本不看帧标记。所以：
+
+- 帧标记：` CLOUDINV: ` → ` DSNAP: `（与 `wist-agentd` 逐字一致）。
+- 信封 `schema`：`cloud_inventory/1` → `atlas.in.inventory.v1`（既定契约的入口路由键）。
+  采集器自有的 `wist.harvest.snapshot.v1` 仍在**正文**里，供下游排障。
+- 数据面收益：不需要再为采集器维护 `models/wpl/cloud_inventory`、
+  `models/oml/cloud_inventory`、`topology/sinks/business.d/cloud_inventory.toml` ——
+  全走现成的 `agent_uplink_obs_dsnap` 规则与 `agent-dsnap` sink 分组。
+
+### 升级注意
+
+- **旧采集器 + 新数据面不可用**：`CLOUDINV:` 帧没有规则匹配，会落 `miss.dat`。
+  先升数据面/规则，再升采集器。
+- **新采集器 + 旧数据面可用**：`DSNAP:` 帧由现有 dsnap 规则接住，`schema` 原样透传给 atlas。
+  这是有意为之 —— 升级顺序只需“采集器不早于数据面”。
+
 ## [0.4.0-alpha] - 2026-11-13
 
 **采集开关可以自拉了：`[control]` 轮询中心配置（不经 gwlinkd）。**

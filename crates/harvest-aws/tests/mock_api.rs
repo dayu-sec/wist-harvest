@@ -392,7 +392,7 @@ fn body_of(frame: &CompleteSnapshot) -> Value {
         .bytes
         .windows(symbol.len())
         .position(|w| w == symbol)
-        .expect("记录里必须有 CLOUDINV: 符号");
+        .expect("记录里必须有 DSNAP: 符号");
     serde_json::from_slice(&frame.bytes[at + symbol.len()..]).expect("正文是 JSON")
 }
 

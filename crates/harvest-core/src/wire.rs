@@ -7,25 +7,34 @@
 //! {"schema":..,"agent":..,"ts":..,"seq":..} DSNAP: <正文>
 //! ```
 //!
-//! 对应 `models/wpl/cloud_inventory/parse.wpl` 里的
-//! `json(chars@schema, chars@agent, chars@ts, digit@seq), symbol(CLOUDINV:), chars:body`，
+//! 云资产快照**就是快照**，所以这里照搬**同一个信封**（`DSNAP:`），不加自己的帧标记：
+//! 数据面因此不需要为采集器多一条 WPL / OML / sink 分组 ——
+//! 走现成的 `models/wpl/agent_uplink/parse.wpl` 里
+//! `json(chars@schema, chars@agent, chars@ts, digit@seq), symbol(DSNAP:), chars:body`，
 //! 符号两侧各有一个空格。
 //!
-//! 这里照搬同一形态，只把符号换成 ` CLOUDINV: `。**不要**把快照直接当 JSON 发出去：
-//! 那样 WPL 的 `json(...), symbol(...)` 结构对不上，记录会落进兜底 sink 或被拒。
-//! 也**不要**在正文末尾补 NUL：实际 WPL 是 `chars:body`，引擎会把 NUL 一起收进 body。
+//! **不要**把快照直接当 JSON 发出去：那样 WPL 的 `json(...), symbol(...)` 结构对不上，
+//! 记录会落进兜底 sink 或被拒。也**不要**在正文末尾补 NUL：实际 WPL 是 `chars:body`，
+//! 引擎会把 NUL 一起收进 body。
 //!
 //! 字段取值都来自快照本身（`collected_at` 而不是 `now()`），这样**同一 `snap_id` 重放
 //! 的帧字节完全一致**，幂等可以直接比对。
 
 use crate::error::HarvestError;
 
-/// 记录的 `schema` 值。属于**线上外壳**，与快照内部的 `schema_native` 是两件事：
-/// 外壳给 wparse 路由/规则用，`schema_native` 给下游解析正文用。
-pub const WIRE_SCHEMA: &str = "cloud_inventory/1";
+/// 记录的 `schema` 值：**入口路由键**，不是采集器自己的版本号。
+///
+/// atlas 的写入端点（`POST /internal/atlas`）按记录里的 `schema` 分发：
+/// 等于 `atlas.in.inventory.v1` 走云资产适配器，其它值走 agentd 快照适配器。
+/// 这是既定契约，所以外壳直接写它 —— 自造一个 `cloud_inventory/1` 再由数据面改写
+/// 只会多一条 OML，并不减少耦合（正文本来就是 atlas 的 inventory 结构）。
+///
+/// 与快照内部的 `schema_native` 是两件事：那个属于**正文**，随快照落盘，供下游排障。
+pub const WIRE_SCHEMA: &str = "atlas.in.inventory.v1";
 
-/// WPL 规则里的符号，与 `models/wpl` 中 `symbol(CLOUDINV:)` 必须逐字一致。
-pub const WIRE_SYMBOL: &str = " CLOUDINV: ";
+/// 信封里的帧标记，与 `models/wpl/agent_uplink/parse.wpl` 中 `symbol(DSNAP:)`
+/// **必须逐字一致**（含两侧空格）。
+pub const WIRE_SYMBOL: &str = " DSNAP: ";
 
 /// 把快照正文包成数据面记录。
 pub fn warp_record(
@@ -71,7 +80,7 @@ mod tests {
         let symbol_at = wire
             .windows(WIRE_SYMBOL.len())
             .position(|w| w == WIRE_SYMBOL.as_bytes())
-            .expect("必须带 CLOUDINV: 符号");
+            .expect("必须带 DSNAP: 符号");
         assert_eq!(&wire[symbol_at + WIRE_SYMBOL.len()..], body);
 
         // 头是合法 JSON，字段与 WPL 的 json(...) 声明一一对应。

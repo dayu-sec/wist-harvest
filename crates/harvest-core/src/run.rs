@@ -370,7 +370,7 @@ where
     spool.set_state(RunState::Verified);
     spool.save()?;
 
-    // 快照正文先序列化，再包成数据面记录（JSON 头 + CLOUDINV: + 正文，不带 NUL）。
+    // 快照正文先序列化，再包成数据面记录（JSON 头 + DSNAP: + 正文，不带 NUL）。
     // 为什么要包：WPL 的规则是 `json(...), symbol(...), chars:body`，直接发裸 JSON
     // 结构对不上，记录会掉进兜底 sink 或被拒；而 NUL 会被引擎一起收进 body。
     let snapshot_json = serde_json::to_vec(&assembled.snapshot)
