@@ -43,7 +43,7 @@ async fn skips_trigger_while_previous_round_is_running() {
     let stats = serve(
         ServeOptions {
             enabled: true,
-            control: None,
+            work: None,
             scheduler: interval_scheduler(
                 Duration::from_millis(20),
                 0,
@@ -57,7 +57,7 @@ async fn skips_trigger_while_previous_round_is_running() {
         async move {
             let _ = shutdown.await;
         },
-        move |_cancel| {
+        move |_request| {
             let gate = Arc::clone(&gate_round);
             async move {
                 // 刻意不响应取消：用来验证"宽限期内没收尾"的分支。
@@ -88,7 +88,7 @@ async fn failures_are_retried_with_backoff_within_one_cycle() {
     let stats = serve(
         ServeOptions {
             enabled: true,
-            control: None,
+            work: None,
             // 定点很远（60s），所以这一轮只会被失败重试驱动。
             scheduler: interval_scheduler(
                 Duration::from_secs(60),
@@ -103,7 +103,7 @@ async fn failures_are_retried_with_backoff_within_one_cycle() {
         async move {
             let _ = shutdown.await;
         },
-        move |_cancel| {
+        move |_request| {
             let counter = Arc::clone(&counter);
             async move {
                 counter.fetch_add(1, Ordering::SeqCst);
@@ -133,7 +133,7 @@ async fn success_stops_the_retry_chain() {
     let stats = serve(
         ServeOptions {
             enabled: true,
-            control: None,
+            work: None,
             scheduler: interval_scheduler(
                 Duration::from_secs(60),
                 5,
@@ -147,7 +147,7 @@ async fn success_stops_the_retry_chain() {
         async move {
             let _ = shutdown.await;
         },
-        move |_cancel| {
+        move |_request| {
             let counter = Arc::clone(&counter);
             async move {
                 let attempt = counter.fetch_add(1, Ordering::SeqCst);
@@ -176,7 +176,7 @@ async fn shutdown_cancels_the_inflight_round() {
     let stats = serve(
         ServeOptions {
             enabled: true,
-            control: None,
+            work: None,
             scheduler: interval_scheduler(
                 Duration::from_secs(60),
                 0,
@@ -190,11 +190,11 @@ async fn shutdown_cancels_the_inflight_round() {
         async move {
             let _ = shutdown.await;
         },
-        move |cancel| {
+        move |request| {
             let watcher = Arc::clone(&watcher);
             async move {
                 for _ in 0..200 {
-                    if cancel.is_cancelled() {
+                    if request.cancel.is_cancelled() {
                         watcher.store(true, Ordering::SeqCst);
                         return RoundOutcome::Aborted;
                     }
@@ -223,7 +223,7 @@ async fn no_round_started_when_shutdown_arrives_before_the_trigger() {
     let stats = serve(
         ServeOptions {
             enabled: true,
-            control: None,
+            work: None,
             scheduler: interval_scheduler(
                 Duration::from_secs(3600),
                 3,
@@ -237,7 +237,7 @@ async fn no_round_started_when_shutdown_arrives_before_the_trigger() {
         async move {
             let _ = shutdown.await;
         },
-        move |_cancel| {
+        move |_request| {
             let counter = Arc::clone(&counter);
             async move {
                 counter.fetch_add(1, Ordering::SeqCst);
@@ -260,7 +260,7 @@ async fn disabled_service_stays_idle_and_runs_no_round() {
     let stats = serve(
         ServeOptions {
             enabled: false,
-            control: None,
+            work: None,
             scheduler: interval_scheduler(
                 Duration::from_millis(20),
                 0,
@@ -272,7 +272,7 @@ async fn disabled_service_stays_idle_and_runs_no_round() {
             run_immediately: true,
         },
         async { tokio::time::sleep(Duration::from_millis(120)).await },
-        move |_cancel| {
+        move |_request| {
             let rounds = Arc::clone(&rounds_round);
             async move {
                 rounds.store(true, Ordering::SeqCst);

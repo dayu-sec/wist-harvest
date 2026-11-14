@@ -263,46 +263,72 @@ pub struct ServiceConfig {
     pub rate: RateSettings,
     #[serde(default)]
     pub sink: SinkSettings,
-    /// 中心配置轮询（自拉，不经 gwlinkd）：`url` 为空 = 不轮询。
+    /// 网关工作授权端点（`work:poll/ack`）：`endpoint` 为空 = 离线模式，用本机调度。
     #[serde(default)]
-    pub control: ControlSettings,
+    pub gateway: GatewaySettings,
 }
 
-/// 中心配置端点（`harvest.enabled` 的真相在中心）。
+/// 网关工作授权端点。
 ///
-/// 为什么是**自拉**而不是中心下发命令：开关属于中心控制逻辑，但执行不必经过 gwlinkd ——
-/// 采集器定时问一句就行，本地不用重启、gwlinkd 也不用认识 harvest。
+/// 采集器**不再读共享开关**：采什么、什么节奏由网关下发（standing），
+/// 凭据真值只在宿主（`credential_ref` 只是引用名）。见网关仓
+/// `docs/design/harvest-work-grant.md`。
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ControlSettings {
-    /// 端点：`GET <url>`，带 `Authorization: Bearer <token>`，返回 `{"enabled": true|false}`。
+pub struct GatewaySettings {
+    /// 网关 TLS 入口，如 `https://<对外域名>:3000`。空 = 不接网关（离线模式）。
+    ///
+    /// 同栈部署时用**站点域名**而不是服务名：网关叶证书的 SAN 是对外域名
+    /// （`<WEB_DOMAIN>,localhost,127.0.0.1`），compose 给 gateway 加了这个域名的
+    /// 网络别名，于是“连内网、验外域名”两件事同时成立。
     #[serde(default)]
-    pub url: String,
+    pub endpoint: String,
+    /// 数据源标识；必须与接入时登记的一致（`worker_id = harvest:<source_code>`）。
+    #[serde(default)]
+    pub source_code: String,
     /// 轮询间隔（毫秒，下限 1000）。
     #[serde(default = "default_control_poll_ms")]
     pub poll_interval_ms: u64,
-    /// 访问端点用的凭据表：`bearer = { file = "/secrets/sec-value.yml", field = "..." }`。
+    /// 服务端信任锚（网关 TLS 证书的 CA，PEM 文件）。缺省用系统根。
     #[serde(default)]
-    pub credential: CredentialTable,
+    pub ca_file: Option<PathBuf>,
+    /// 身份目录（客户端证书 + 私钥）。缺省 `<state_dir>/identity`。
+    #[serde(default)]
+    pub identity_dir: Option<PathBuf>,
+    /// 一次性接入券（只在没有证书时用）：`{ file = "/secrets/sec-value.yml", field = "..." }`。
+    #[serde(default)]
+    pub enroll_ticket: Option<SecretRef>,
+    /// 管理面 admin token：**只供 `bootstrap` 子命令**签发接入券 / 建初始 standing；
+    /// `run` 不读它。
+    #[serde(default)]
+    pub admin_token: Option<SecretRef>,
 }
 
-impl Default for ControlSettings {
+impl Default for GatewaySettings {
     fn default() -> Self {
         Self {
-            url: String::new(),
+            endpoint: String::new(),
+            source_code: String::new(),
             poll_interval_ms: default_control_poll_ms(),
-            credential: CredentialTable::default(),
+            ca_file: None,
+            identity_dir: None,
+            enroll_ticket: None,
+            admin_token: None,
         }
     }
 }
 
-impl ControlSettings {
-    pub fn is_enabled(&self) -> bool {
-        !self.url.trim().is_empty()
+impl GatewaySettings {
+    pub fn is_configured(&self) -> bool {
+        !self.endpoint.trim().is_empty()
     }
 
     pub fn poll_interval(&self) -> std::time::Duration {
         std::time::Duration::from_millis(self.poll_interval_ms.max(1000))
+    }
+
+    pub fn worker_id(&self) -> String {
+        format!("harvest:{}", self.source_code.trim())
     }
 }
 
@@ -1162,21 +1188,22 @@ secret_key = { env = "B" }
     }
 
     #[test]
-    fn control_settings_default_to_off_and_can_be_configured() {
+    fn gateway_settings_default_to_off_and_can_be_configured() {
         let default = ServiceConfig::parse("").unwrap();
-        assert!(!default.control.is_enabled());
-        assert_eq!(default.control.poll_interval_ms, 30_000);
+        assert!(!default.gateway.is_configured());
+        assert_eq!(default.gateway.poll_interval_ms, 30_000);
 
-        let raw =
-            "[control]\nurl = \"http://gateway:3001/internal/harvest\"\npoll_interval_ms = 5000\n";
+        let raw = "[gateway]\nendpoint = \"https://gw.example.com:3000\"\nsource_code = \"tencent-cloud-prod\"\npoll_interval_ms = 5000\n";
         let cfg = ServiceConfig::parse(raw).unwrap();
-        assert!(cfg.control.is_enabled());
-        assert_eq!(cfg.control.poll_interval().as_millis(), 5000);
+        assert!(cfg.gateway.is_configured());
+        assert_eq!(cfg.gateway.poll_interval().as_millis(), 5000);
+        assert_eq!(cfg.gateway.worker_id(), "harvest:tencent-cloud-prod");
 
-        // 下限 1s：写 10ms 也不会把中心打爆。
+        // 下限 1s：写 10ms 也不会把网关打爆。
         let fast =
-            ServiceConfig::parse("[control]\nurl = \"http://x\"\npoll_interval_ms = 10\n").unwrap();
-        assert_eq!(fast.control.poll_interval().as_millis(), 1000);
+            ServiceConfig::parse("[gateway]\nendpoint = \"https://x\"\npoll_interval_ms = 10\n")
+                .unwrap();
+        assert_eq!(fast.gateway.poll_interval().as_millis(), 1000);
     }
 
     #[test]

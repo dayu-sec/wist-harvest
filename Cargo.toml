@@ -9,7 +9,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.5.0" #@gxl:set(version)
+version = "0.6.0" #@gxl:set(version)
 edition = "2024"
 publish = false
 license = "Apache-2.0"
@@ -19,6 +19,8 @@ harvest-core = { path = "crates/harvest-core" }
 harvest-tencent = { path = "crates/harvest-tencent" }
 harvest-aws = { path = "crates/harvest-aws" }
 harvest-warp = { path = "crates/harvest-warp" }
+# 工作授权报文与网关共用一份定义（`wist-api::harvest_work`）；本地开发用 path patch。
+wist-api = "0.12"
 
 async-trait = "0.1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std", "serde"] }
@@ -27,7 +29,8 @@ hex = "0.4"
 hmac = "0.12"
 libc = "0.2"
 quick-xml = { version = "0.41", features = ["serialize"] }
-reqwest = { version = "0.13", features = ["json", "http2"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "http2", "rustls", "rustls-native-certs"] }
+rcgen = "0.13"
 rustls = "0.23"
 rustls-pki-types = { version = "1", features = ["std"] }
 serde = { version = "1", features = ["derive"] }
@@ -39,3 +42,9 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "io-ut
 tokio-rustls = "0.26"
 toml = "1"
 webpki-roots = "0.26"
+x509-parser = "0.16"
+
+# 本地联调：与 wist-api 同期改动时启用（`harvest_work` seam 只在本地版本里）。
+# **发布态不要留**：wist-api 0.12.0 已发布，这里回到 registry 版本。
+# [patch.crates-io]
+# wist-api = { path = "../wist/wist-api" }

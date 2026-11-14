@@ -141,6 +141,11 @@ impl Default for SchedulerConfig {
 pub enum RoundTrigger {
     Scheduled,
     Retry,
+    /// 网关派下来的**一次性工作**（页面「立即采集」）。
+    ///
+    /// 与定点的区别不只是文案：它**不反哺调度器**（成功/失败都不推后下一次定点），
+    /// 否则一次手动失败会把站点当天的定时采集整体拖后。
+    Manual,
 }
 
 impl RoundTrigger {
@@ -148,6 +153,7 @@ impl RoundTrigger {
         match self {
             Self::Scheduled => "scheduled",
             Self::Retry => "retry",
+            Self::Manual => "manual",
         }
     }
 }

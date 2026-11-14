@@ -77,6 +77,13 @@ enum Command {
         #[arg(long)]
         now: bool,
     },
+    /// 同栈一次性接入 + 初始授权（幂等；`run` 之前跑一次）。
+    Bootstrap {
+        #[arg(long)]
+        config: PathBuf,
+        #[arg(long)]
+        source: PathBuf,
+    },
     /// 打印生效配置与采集计划，不联网、不写盘。
     DryRun {
         #[arg(long)]
@@ -171,7 +178,7 @@ fn main() {
                     None => Duration::from_secs(30),
                 };
 
-                // `enabled` / `[control]` 是运行时开关（中心关采集时进程常驻但不调度）。
+                // `enabled` 是本地硬关；`[gateway]` 是工作授权（采什么/节奏由网关下发）。
                 // 这里单独读一次配置：读不出来要在启动期就明确失败，而不是等到第一轮。
                 let service = match harvest_core::config::ServiceConfig::load(&config) {
                     Ok(service) => service,
@@ -181,19 +188,36 @@ fn main() {
                     }
                 };
                 let enabled = service.service.enabled;
-                let control = if service.control.is_enabled() {
-                    // token 可选（内网端点可能不校验）；读到就注册进脱敏器，永不落日志。
-                    let token = match service.control.credential.get("bearer") {
-                        Ok(secret) => {
+                let work = if service.gateway.is_configured() {
+                    // 接入券的来源（只在“没有证书”时用）：配置引用 → 环境变量
+                    // → `<state_dir>/enroll.ticket`（最后一次回退在连接器里）。
+                    // **可选**：同栈部署由 `harvest-bootstrap` 现签一张并**当场换证书**，
+                    // 所以这两个来源通常都没有值 —— 缺它不是错误。
+                    let configured = service
+                        .gateway
+                        .enroll_ticket
+                        .as_ref()
+                        .and_then(|reference| reference.load().ok())
+                        .map(|secret| {
                             harvest_core::redact::register_secret(secret.expose());
-                            Some(secret.expose().to_string())
-                        }
-                        Err(_) => None,
-                    };
-                    Some(harvest_app::serve::ControlPlan {
-                        url: service.control.url.trim().to_string(),
-                        token,
-                        poll_interval: service.control.poll_interval(),
+                            secret.expose().to_string()
+                        });
+                    let ticket = configured.or_else(|| {
+                        std::env::var("HARVEST_ENROLL_TICKET")
+                            .ok()
+                            .filter(|value| !value.trim().is_empty())
+                    });
+                    if let Some(ticket) = ticket.as_deref() {
+                        harvest_core::redact::register_secret(ticket);
+                    }
+                    // 这里**不连**：接入 / 续期 / 重连都在 `serve` 的轮询任务里退避重试，
+                    // 网关晚起、券晚落盘都不需要重启容器。
+                    Some(harvest_app::serve::WorkPlan {
+                        gateway: harvest_app::gateway::GatewayConnector::new(
+                            &service.gateway,
+                            &service.service.state_dir,
+                            ticket,
+                        ),
                     })
                 } else {
                     None
@@ -201,7 +225,7 @@ fn main() {
 
                 let opts = harvest_app::serve::ServeOptions {
                     enabled,
-                    control,
+                    work,
                     scheduler,
                     resume: !fresh,
                     shutdown_grace: grace,
@@ -209,16 +233,21 @@ fn main() {
                 };
                 let round_config = config.clone();
                 let round_source = source.clone();
-                let resume = !fresh;
 
                 let stats = harvest_app::serve::serve(
                     opts,
                     harvest_app::serve::shutdown_signal(),
-                    move |cancel| {
+                    move |request| {
                         let config = round_config.clone();
                         let source = round_source.clone();
                         async move {
-                            harvest_app::round::run_round(&config, &source, resume, cancel).await
+                            harvest_app::round::run_round(
+                                &config,
+                                &source,
+                                request.resume,
+                                request.cancel,
+                            )
+                            .await
                         }
                     },
                 )
@@ -238,6 +267,9 @@ fn main() {
                 day,
                 output_dir,
             } => harvest_app::cost::run(config, source, month, day, output_dir).await,
+            Command::Bootstrap { config, source } => {
+                harvest_app::bootstrap::run(&config, &source).await
+            }
             Command::DryRun { config, source } => harvest_app::dryrun::run(&config, &source),
             Command::Diagnose {
                 config,

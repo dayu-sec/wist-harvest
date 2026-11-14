@@ -3,6 +3,35 @@
 本文件记录 `wist-harvest` 的所有重要变更。格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.6.0-alpha] - 2026-11-14
+
+**采集授权改由网关下发（wire + 配置双破坏）。**
+
+原来采集开关是中心一个共享布尔值（`[control]` 轮询 `harvest/control`）。但一个开关回答不了
+「采什么 / 什么节奏 / 用哪个凭据引用」，也无法区分多个采集器。现在改成按 worker 的工作授权：
+
+- **身份就是 mTLS 客户端证书**（与 agentd 同一把 CA）：首启用一次性接入券 + CSR 换证书
+  （私钥不出本机），到期前用旧证书链式续期；**没有 bearer 轨道**。
+- 每拍 `work:poll` 拿 `standing`（采集面 / 区域 / 节奏 / `credential_ref`）+ 未了结的一次性工作，
+  应用后 `ack`；`plan_version` 变化必须重新确认。
+- **一次性工作**（页面按钮）：`inventory.run` / `inventory.rescan`（后者强制 `fresh`），
+  执行前报 `running`、结束报 `succeeded`/`failed`；排队过 `deadline_at` 直接报失败。
+  结果就是回执，**不再单独 ack**。
+- **失败不靠重启**：接入 / 续期 / 轮询全部后台退避重试；没证书也没券时进程常驻但不调度；
+  每 6 小时主动重连一次（否则启动时那次续期失败就再没机会重试）。连续 6 拍拿不到授权则
+  fail-closed 停用上一份授权。
+- **`bootstrap` 子命令**（同栈部署用）：用管理面 admin token 现签接入券、**当场换证书**、
+  再建初始 `plan_version=1` 的 standing；顺序不能反（worker 行是 enroll 才建的）。
+- `service.enabled=false`（本地硬关）不再停止轮询：心跳与续期要继续，否则硬关 37 天后证书过期。
+  手动触发也越不过它，且会**上报失败**而不是静默丢弃。
+
+### 变更（破坏性）
+
+- 配置段 `[control]` → `[gateway]`（`endpoint` / `source_code` / `poll_interval_ms` / `ca_file` /
+  `identity_dir` / `enroll_ticket` / `admin_token`）；`deny_unknown_fields`，旧配置直接解析失败。
+- `run` 的 `--run-at` / `--interval` 降为**离线模式兜底**：配了 `[gateway]` 时以 standing 为准。
+- 需要 `wist-gateway >= 0.48.0`（`work:poll/ack/result` 与 `credentials:renew`）。
+
 ## [0.5.0-alpha] - 2026-11-13
 
 **线上记录改用 `DSNAP:` 信封（wire 变更）。**
