@@ -295,11 +295,11 @@ pub struct GatewaySettings {
     /// 身份目录（客户端证书 + 私钥）。缺省 `<state_dir>/identity`。
     #[serde(default)]
     pub identity_dir: Option<PathBuf>,
-    /// 一次性接入券（只在没有证书时用）：`{ file = "/secrets/sec-value.yml", field = "..." }`。
-    #[serde(default)]
-    pub enroll_ticket: Option<SecretRef>,
     /// 管理面 admin token：**只供 `bootstrap` 子命令**签发接入券 / 建初始 standing；
     /// `run` 不读它。
+    ///
+    /// 这是**长期**密钥（要轮换、要进备份），所以放宿主 `.wist/sec-value.yml`。
+    /// 与它相反：**一次性接入券不进密钥库** —— 券只在接入那一刻活几秒（见 `bootstrap`）。
     #[serde(default)]
     pub admin_token: Option<SecretRef>,
 }
@@ -312,7 +312,6 @@ impl Default for GatewaySettings {
             poll_interval_ms: default_control_poll_ms(),
             ca_file: None,
             identity_dir: None,
-            enroll_ticket: None,
             admin_token: None,
         }
     }

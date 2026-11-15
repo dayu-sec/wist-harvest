@@ -3,6 +3,23 @@
 本文件记录 `wist-harvest` 的所有重要变更。格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.7.0-alpha] - 2026-11-15
+
+**一次性接入券不再进长期密钥库（配置破坏）。**
+
+券是「一次性邀请码」：用完即废、默认 24h 过期。把它放进 `.wist/sec-value.yml` 混淆了两件事 ——
+那里是 admin token、云 SecretId/Key 这种**要轮换、要进备份、要告诉运维**的凭据；而券还因此被
+`:ro` 挂进了用不到它的容器。现在券只走两条**瞬时通道**：
+
+- 同栈：`harvest-bootstrap` 用 admin token 现签、**内存里直接用**（不落盘、不上屏）；
+- 跨机：`<state_dir>/enroll.ticket`（0600，成功接入即删），或一次性环境变量
+  `HARVEST_ENROLL_TICKET`（注意它会在 `docker inspect` 里可见）。
+
+`[gateway.enroll_ticket]` 配置段已删除（`deny_unknown_fields`：旧配置会直接解析失败）。
+`bootstrap` 遇到「现场投放的券不能用」（已用 / 过期）会删掉它并改为现签，不再反复拿废券重试。
+
+长期身份仍然是**证书**（37 天，到期前 7 天自动续期），不是券。
+
 ## [0.6.0-alpha] - 2026-11-14
 
 **采集授权改由网关下发（wire + 配置双破坏）。**

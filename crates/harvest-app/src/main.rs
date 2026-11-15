@@ -189,24 +189,13 @@ fn main() {
                 };
                 let enabled = service.service.enabled;
                 let work = if service.gateway.is_configured() {
-                    // 接入券的来源（只在“没有证书”时用）：配置引用 → 环境变量
-                    // → `<state_dir>/enroll.ticket`（最后一次回退在连接器里）。
-                    // **可选**：同栈部署由 `harvest-bootstrap` 现签一张并**当场换证书**，
-                    // 所以这两个来源通常都没有值 —— 缺它不是错误。
-                    let configured = service
-                        .gateway
-                        .enroll_ticket
-                        .as_ref()
-                        .and_then(|reference| reference.load().ok())
-                        .map(|secret| {
-                            harvest_core::redact::register_secret(secret.expose());
-                            secret.expose().to_string()
-                        });
-                    let ticket = configured.or_else(|| {
-                        std::env::var("HARVEST_ENROLL_TICKET")
-                            .ok()
-                            .filter(|value| !value.trim().is_empty())
-                    });
+                    // 接入券的两个来源都**不落长期密钥库**（它是一次性的，不是凭据）：
+                    //   · `HARVEST_ENROLL_TICKET`（一次性环境变量；注意会出现在 `docker inspect`）
+                    //   · `<state_dir>/enroll.ticket`（操作者投放，0600，用完即删）—— 回退在连接器里
+                    // 同栈部署两者都没有：`harvest-bootstrap` 现签现用，所以缺它不是错误。
+                    let ticket = std::env::var("HARVEST_ENROLL_TICKET")
+                        .ok()
+                        .filter(|value| !value.trim().is_empty());
                     if let Some(ticket) = ticket.as_deref() {
                         harvest_core::redact::register_secret(ticket);
                     }
