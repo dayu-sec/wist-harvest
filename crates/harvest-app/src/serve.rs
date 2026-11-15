@@ -903,7 +903,7 @@ mod tests {
     }
 
     fn unreachable_work(state_dir: &std::path::Path) -> WorkPlan {
-        // 有端点但没证书、没券：`connect()` 立刻失败（不发任何请求）。
+        // 有端点但没证书：`connect()` 立刻失败（不发任何请求）。
         WorkPlan {
             gateway: crate::gateway::GatewayConnector::new(
                 &harvest_core::config::GatewaySettings {
@@ -912,7 +912,6 @@ mod tests {
                     ..Default::default()
                 },
                 state_dir,
-                None,
             ),
         }
     }

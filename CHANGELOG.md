@@ -3,6 +3,21 @@
 本文件记录 `wist-harvest` 的所有重要变更。格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.7.2-alpha] - 2026-11-15
+
+**删掉“人工投券”这条路：`run` 不再自己接入。**
+
+采集器只作为网关栈的服务存在，所以接入的唯一入口是 `harvest-bootstrap`：它用管理面 token
+向网关现签一张一次性券，拿到**当场换证书**，券不落盘。留着“从盘上/环境里取券再接入”的路，
+实际是多一条靠属主、写入时机都对的隐式旁路 —— 错了就是一个查不动的问题。于是：
+
+- `run` 没有客户端证书时**直接报错**（指向 `harvest-bootstrap`），不再自己发接入请求；
+- 删除 `<state_dir>/enroll.ticket` 通道（`ticket_from_state_dir` 已移除）与 `HARVEST_ENROLL_TICKET`
+  环境变量；测试守住“盘上留着券文件也不会被采纳”。
+- `bootstrap` 简化为：身份不在 → 签券 → 换证书（失败只告警，不阻断 pull 起 `run`）。
+
+长期身份仍然是**证书**（37 天，到期前 7 天自动续期），不是券。
+
 ## [0.7.1-alpha] - 2026-11-15
 
 **日志里说不清「券往哪儿放」的问题。**

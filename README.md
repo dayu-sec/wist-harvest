@@ -251,6 +251,22 @@ wist-harvest run --config ... --source ... \
   停下来进 `Aborted`（**数据平面零帧**，spool 留着下次续跑）；已经 `Verified`
   的轮次会正常发完再退。等不到 `--shutdown-grace` 就直接退出，退出码 `0`。
 
+## 接入网关（为什么 `run` 不会自己接入）
+
+采集器只作为网关栈（`wist-gateway-stack`）的服务存在，所以接入有**唯一一个入口**：栈的
+`harvest-bootstrap`。它用管理面 token 向网关现签一张一次性券，拿到**当场换成客户端证书**
+（券不落盘），成功后才拉起 `run`。
+
+因此：
+
+- `run` 发现没有客户端证书时**直接报错并按拍重试**（`connect()` 不发任何接入请求）；
+- 盘上也没有“投券”这个入口：`<state_dir>/enroll.ticket` 与 `HARVEST_ENROLL_TICKET` 都已删除，
+  留着它们只会多一条靠属主 / 写入时机都对的隐式旁路；
+- 重新接入（换了 CA、身份泄露、换机器）：删掉 `<state_dir>/identity/`，再 `gops run start`
+  让 bootstrap 重跑一遍。
+
+证书是**长期**身份（37 天，剩 ≤7 天自动续期；被吊销就 `403`）。
+
 ## 容器 healthcheck
 
 ```yaml

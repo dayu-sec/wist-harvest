@@ -54,54 +54,30 @@ async fn run_inner(config_path: &Path, source_path: &Path) -> Result<(), String>
 
     // ① 身份：缺就接入。
     //
-    //    接入券的两个来源都是**瞬时**的，不进长期密钥库（`.wist/sec-value.yml` 里只放
-    //    admin token 这种要轮换 / 进备份的凭据）：
-    //      · `HARVEST_ENROLL_TICKET`（一次性环境变量；会在 `docker inspect` 里可见）
-    //      · `<state_dir>/enroll.ticket`（操作者投放，0600，用完即删）
-    //    两者都没有才现签一张（同栈默认路径：券只在内存里活几秒）。
-    let mut connector =
-        GatewayConnector::new(&config.gateway, &config.service.state_dir, env_ticket());
+    //    **只有一条路**：用管理面 token 向网关现签一张一次性券，拿到当场换证书，然后丢掉。
+    //    券既不落盘、也没有“现场投放”这个入口 —— 采集器只作为栈的服务存在，接接入是
+    //    bootstrap 的事；留一条读券文件的路只会制造靠属主/时机都对的隐式旁路。
+    let connector = GatewayConnector::new(&config.gateway, &config.service.state_dir);
     if connector.identity_ready() {
         println!(
-            "身份已存在：{}（跳过接入券）",
+            "身份已存在：{}（跳过接入）",
             connector.identity_dir().display()
         );
     } else {
-        let operator_ticket =
-            env_ticket().or_else(|| gateway::ticket_from_state_dir(&config.service.state_dir));
         let mut enrolled = false;
-        if let Some(ticket) = operator_ticket.as_deref() {
-            redact::register_secret(ticket);
-            match enroll_with(&config, ticket).await {
-                Ok(()) => enrolled = true,
-                Err(err) => {
-                    // 券只能消费一次：文件里那张多半是用过的。留着它只会每轮都失败，
-                    // 所以删掉再说 —— 它是**我们自己的**临时文件，不是别人的凭据。
-                    redact::warn(format!(
-                        "现场接入券不可用（{err}）：已删除 {}，改为必要时现签",
-                        config.service.state_dir.join("enroll.ticket").display()
-                    ));
-                    let _ = std::fs::remove_file(config.service.state_dir.join("enroll.ticket"));
+        match mint_ticket(&http, endpoint, &config, &source.source_code).await? {
+            Some(ticket) => {
+                redact::register_secret(&ticket);
+                if let Err(err) = connector.enroll(&ticket).await {
+                    redact::warn(format!("接入网关失败（run 会按拍重试）：{err}"));
+                } else {
+                    enrolled = true;
                 }
             }
+            None => redact::warn(
+                "拿不到管理面 token：跳过接入（补上 [gateway].admin_token 后 `gops run start` 会重跑）",
+            ),
         }
-        if !enrolled {
-            match mint_ticket(&http, endpoint, &config, &source.source_code).await? {
-                Some(ticket) => {
-                    redact::register_secret(&ticket);
-                    if let Err(err) = enroll_with(&config, &ticket).await {
-                        redact::warn(format!("接入网关失败（run 会按拍重试）：{err}"));
-                    } else {
-                        enrolled = true;
-                    }
-                }
-                None => redact::warn(
-                    "没有接入券也拿不到 admin token：跳过接入，run 会按拍重试（补上其一即可自愈）",
-                ),
-            }
-        }
-        // 身份已就位后重建 connector：`connect()` 顺带重查/续期证书。
-        connector = GatewayConnector::new(&config.gateway, &config.service.state_dir, None);
         if !enrolled {
             redact::warn("尚未接入：跳过初始授权（接入后到页面「云资产采集」卡授权）");
             return Ok(());
@@ -151,29 +127,6 @@ async fn run_inner(config_path: &Path, source_path: &Path) -> Result<(), String>
     put_standing(&http, endpoint, &admin, &worker_id, &spec).await?;
     println!("已建立初始 standing：{worker_id}（plan_version=1）");
     Ok(())
-}
-
-/// 一次性接入券：**只有环境变量这一条“配置”通道**。
-///
-/// 券是短命的、一次性的，不应进 `.wist/sec-value.yml` 那种长期密钥库（那里面是 admin token、
-/// 云 SecretId/Key 这类要轮换、要进备份的东西）。跨机部署的常规通道是
-/// `<state_dir>/enroll.ticket`（见 §①）；环境变量留给一次性排障。
-fn env_ticket() -> Option<String> {
-    std::env::var("HARVEST_ENROLL_TICKET")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-}
-
-/// 用一张券完成接入（成功即写好 `identity/`，并删掉盘上那张券）。
-async fn enroll_with(config: &ServiceConfig, ticket: &str) -> Result<(), String> {
-    GatewayConnector::new(
-        &config.gateway,
-        &config.service.state_dir,
-        Some(ticket.to_string()),
-    )
-    .connect()
-    .await
-    .map(|_| ())
 }
 
 fn admin_token(config: &ServiceConfig) -> Result<String, String> {
@@ -439,19 +392,6 @@ secret_key = { env = "SEC_TENCENT_SECRET_KEY" }
         assert!(
             parsed.is_err(),
             "接入券不能走 sec-value.yml（它是一次性的，不是要维护的凭据）"
-        );
-    }
-
-    /// 跨机部署的常规通道是 `state/enroll.ticket`，由操作者投放、用完即删。
-    #[test]
-    fn the_state_dir_ticket_file_is_the_cross_host_channel() {
-        let state = tempfile::tempdir().expect("tempdir");
-        assert!(gateway::ticket_from_state_dir(state.path()).is_none());
-        std::fs::write(state.path().join("enroll.ticket"), "hwt-from-operator\n")
-            .expect("write ticket");
-        assert_eq!(
-            gateway::ticket_from_state_dir(state.path()).as_deref(),
-            Some("hwt-from-operator")
         );
     }
 }

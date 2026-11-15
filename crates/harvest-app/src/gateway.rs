@@ -151,24 +151,21 @@ impl GatewayClient {
 
 /// 接入所需的全部输入（与 `run` 同寿）。
 ///
-/// 为什么是“连接器”而不是一个连接：证书可能还没签、接入券可能还没落盘、
-/// 网关可能还没起 —— 这些都不该要求人工重启容器。
+/// 为什么是“连接器”而不是一个连接：证书可能还没签、网关可能还没起 —— 这些都不该要求人工重启容器。
+/// 但**接入本身不在它手里**：栈内接入只有 `harvest-bootstrap` 一条路（它现签一张券、当场换证书）；
+/// 这个类型只管“拿已有证书把自己连上去、到期续期、被吊销就 fail-closed”。
 #[derive(Clone)]
 pub struct GatewayConnector {
     settings: GatewaySettings,
     state_dir: PathBuf,
-    /// 启动时已知的接入券（配置 / 环境变量）。没有就每次尝试时去 `<state_dir>/enroll.ticket` 找，
-    /// 这样 `harvest-bootstrap` 晚一点写入也能生效。
-    ticket: Option<String>,
     instance_id: String,
 }
 
 impl GatewayConnector {
-    pub fn new(settings: &GatewaySettings, state_dir: &Path, ticket: Option<String>) -> Self {
+    pub fn new(settings: &GatewaySettings, state_dir: &Path) -> Self {
         Self {
             settings: settings.clone(),
             state_dir: state_dir.to_path_buf(),
-            ticket,
             instance_id: new_instance_id(),
         }
     }
@@ -204,21 +201,11 @@ impl GatewayConnector {
         let worker_id = self.settings.worker_id();
         let identity = self.identity_paths();
 
+        // 没证书就是没接入：**`run` 不自己去接入**。栈内只有 `harvest-bootstrap` 会接入
+        // （现签一张券、当场换成证书），所以这里只报错、不碰网络，免得“重试”把一次本来
+        // 该由 bootstrap 完成的接入变成一条靠券文件、属主、写入时机都对的隐式旁路。
         if !identity.ready() {
-            let ticket = self
-                .ticket()
-                .ok_or_else(|| no_identity_hint(&self.state_dir))?;
-            enroll(
-                &self.settings,
-                endpoint,
-                &worker_id,
-                source_code,
-                &identity,
-                ticket.as_str(),
-            )
-            .await?;
-            // 券已用掉：留在盘上只是多一份凭据。
-            let _ = std::fs::remove_file(self.state_dir.join("enroll.ticket"));
+            return Err(missing_identity_hint());
         }
 
         let expiry = certificate_expiry(&identity.cert).map_err(|err| {
@@ -265,6 +252,30 @@ impl GatewayConnector {
         })
     }
 
+    /// 用一张**刚从网关签出来的**券换客户端证书（成功即写好 `identity/`）。
+    ///
+    /// 只给 `harvest-bootstrap` 用：券是它现签的，拿到就换、不落盘。`run` 不走这条路 ——
+    /// 栈内没有“把券交给采集器”的人工步骤。
+    pub async fn enroll(&self, ticket: &str) -> Result<(), String> {
+        let endpoint = self.settings.endpoint.trim().trim_end_matches('/');
+        if endpoint.is_empty() {
+            return Err("[gateway].endpoint 为空".to_string());
+        }
+        let source_code = self.settings.source_code.trim();
+        if source_code.is_empty() {
+            return Err("[gateway].source_code 为空".to_string());
+        }
+        enroll(
+            &self.settings,
+            endpoint,
+            &self.settings.worker_id(),
+            source_code,
+            &self.identity_paths(),
+            ticket,
+        )
+        .await
+    }
+
     fn identity_paths(&self) -> IdentityPaths {
         let dir = self
             .settings
@@ -276,13 +287,6 @@ impl GatewayConnector {
             key: dir.join("client.key"),
             dir,
         }
-    }
-
-    /// 这次接入要用的券：现场显式给的 → `<state_dir>/enroll.ticket`。
-    pub(crate) fn ticket(&self) -> Option<String> {
-        self.ticket
-            .clone()
-            .or_else(|| ticket_from_state_dir(&self.state_dir))
     }
 }
 
@@ -513,28 +517,11 @@ fn new_instance_id() -> String {
     format!("hinst-{}", std::process::id())
 }
 
-/// 「既没证书也没券」时告诉现场**把券放哪儿**。
-///
-/// 这句话是操作者在日志里唯一会看到的指引，所以必须带上采集器真正会去读的那个路径，
-/// 而不是泛指「到网关页签发」—— 券是一次性的，不进长期密钥库（`.wist/sec-value.yml`）。
-fn no_identity_hint(state_dir: &Path) -> String {
-    format!(
-        "没有客户端证书，也没有接入券：同栈部署等 `harvest-bootstrap` 自动接入；\
-         跨机部署在网关页「签发接入券」后，把券写成 {}（0600，一次一用，换到证书后自动删除）",
-        state_dir.join("enroll.ticket").display()
-    )
-}
-
-/// bootstrap 写在 `<state_dir>/enroll.ticket` 里的一次性接入券（还没换成证书时）。
-pub fn ticket_from_state_dir(state_dir: &Path) -> Option<String> {
-    let path = state_dir.join("enroll.ticket");
-    let raw = std::fs::read_to_string(path).ok()?;
-    let ticket = raw.trim();
-    if ticket.is_empty() {
-        None
-    } else {
-        Some(ticket.to_string())
-    }
+/// 「手上没有客户端证书」时的报错。(state_dir 保留在签名里是为了不再引入“去哪儿找券”的暗示。)
+fn missing_identity_hint() -> String {
+    "没有客户端证书：接入由 `harvest-bootstrap` 完成（它用管理面 token 向网关现签一张券、\
+     当场换成证书），`run` 自己不接入。修好它的输入后 `gops run start` 会重跑一次接入。"
+        .to_string()
 }
 
 fn now_rfc3339() -> String {
@@ -628,7 +615,7 @@ mod tests {
     #[test]
     fn identity_dir_defaults_under_state_dir_and_can_be_overridden() {
         let state = Path::new("/var/lib/wist-harvest/state");
-        let connector = GatewayConnector::new(&settings(), state, None);
+        let connector = GatewayConnector::new(&settings(), state);
         assert_eq!(
             connector.identity_dir(),
             state.join("identity"),
@@ -637,25 +624,10 @@ mod tests {
 
         let mut custom = settings();
         custom.identity_dir = Some(PathBuf::from("/etc/wist-harvest/identity"));
-        let connector = GatewayConnector::new(&custom, state, None);
+        let connector = GatewayConnector::new(&custom, state);
         assert_eq!(
             connector.identity_dir(),
             PathBuf::from("/etc/wist-harvest/identity")
-        );
-    }
-
-    #[test]
-    fn one_shot_ticket_file_is_read_and_trimmed() {
-        let state = tempfile::tempdir().expect("tempdir");
-        assert!(ticket_from_state_dir(state.path()).is_none(), "缺文件");
-
-        std::fs::write(state.path().join("enroll.ticket"), "   \n").expect("blank");
-        assert!(ticket_from_state_dir(state.path()).is_none(), "只有空白");
-
-        std::fs::write(state.path().join("enroll.ticket"), "hwt-abc\n").expect("ticket");
-        assert_eq!(
-            ticket_from_state_dir(state.path()).as_deref(),
-            Some("hwt-abc")
         );
     }
 
@@ -683,24 +655,33 @@ mod tests {
         );
     }
 
-    /// 没证书也没券：只能报错（带下一步该做什么），不能 panic。
+    /// 没证书：只能报错（带下一步该做什么），不能 panic。
     /// 这是 `run` 能“常驻重试”而不是“重启才恢复”的前提。
-    /// 报错必须**点名采集器真正会去读的那个文件**：现场只照这行日志操作。
+    /// 报错必须指向**唯一的接入者**（`harvest-bootstrap`），而不是让你往盘上投券。
     #[tokio::test]
-    async fn connect_without_identity_or_ticket_explains_what_is_missing() {
+    async fn connect_without_identity_explains_that_bootstrap_owns_enrollment() {
         let state = tempfile::tempdir().expect("tempdir");
-        let connector = GatewayConnector::new(&settings(), state.path(), None);
+        let connector = GatewayConnector::new(&settings(), state.path());
         assert!(!connector.identity_ready());
         let err = connector.connect().await.err().expect("no identity");
-        assert!(err.contains("接入券"), "{err}");
-        let expected = state.path().join("enroll.ticket");
+        assert!(err.contains("harvest-bootstrap"), "{err}");
+        assert!(!err.contains("enroll.ticket"), "不该再提券文件：{err}");
+        assert!(!err.contains("sec-value.yml"), "{err}");
+    }
+
+    /// 券文件这条通道已删除：`run` 看到 `state/enroll.ticket` 也不会去接入。
+    /// 守住这个 —— 否则“人工投券”的隐式旁路会悄悄回来（属主 / 写入时机不对，就是一个查不动的问题）。
+    #[tokio::test]
+    async fn a_leftover_ticket_file_is_ignored_and_run_does_not_enroll() {
+        let state = tempfile::tempdir().expect("tempdir");
+        std::fs::write(state.path().join("enroll.ticket"), "hwt-from-operator\n")
+            .expect("write ticket");
+        let connector = GatewayConnector::new(&settings(), state.path());
+        let err = connector.connect().await.err().expect("no identity");
+        assert!(err.contains("harvest-bootstrap"), "{err}");
         assert!(
-            err.contains(&expected.display().to_string()),
-            "要告诉现场写到哪个文件：{err}"
-        );
-        assert!(
-            !err.contains("sec-value.yml"),
-            "券是一次性的，不能指回长期密钥库：{err}"
+            !err.contains("enroll.ticket"),
+            "不该再提券文件这条路：{err}"
         );
     }
 
@@ -713,7 +694,7 @@ mod tests {
         std::fs::write(identity.join("client.crt"), self_signed_pem(-1)).expect("cert");
         std::fs::write(identity.join("client.key"), "not a key").expect("key");
 
-        let connector = GatewayConnector::new(&settings(), state.path(), None);
+        let connector = GatewayConnector::new(&settings(), state.path());
         assert!(connector.identity_ready());
         let err = connector.connect().await.err().expect("expired");
         assert!(err.contains("过期"), "{err}");

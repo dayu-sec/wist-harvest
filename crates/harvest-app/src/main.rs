@@ -189,23 +189,13 @@ fn main() {
                 };
                 let enabled = service.service.enabled;
                 let work = if service.gateway.is_configured() {
-                    // 接入券的两个来源都**不落长期密钥库**（它是一次性的，不是凭据）：
-                    //   · `HARVEST_ENROLL_TICKET`（一次性环境变量；注意会出现在 `docker inspect`）
-                    //   · `<state_dir>/enroll.ticket`（操作者投放，0600，用完即删）—— 回退在连接器里
-                    // 同栈部署两者都没有：`harvest-bootstrap` 现签现用，所以缺它不是错误。
-                    let ticket = std::env::var("HARVEST_ENROLL_TICKET")
-                        .ok()
-                        .filter(|value| !value.trim().is_empty());
-                    if let Some(ticket) = ticket.as_deref() {
-                        harvest_core::redact::register_secret(ticket);
-                    }
                     // 这里**不连**：接入 / 续期 / 重连都在 `serve` 的轮询任务里退避重试，
-                    // 网关晚起、券晚落盘都不需要重启容器。
+                    // 网关晚起也不需要重启容器。
+                    // 接入本身不在 `run` 手里：栈内只有 `harvest-bootstrap` 会现签一张券换证书。
                     Some(harvest_app::serve::WorkPlan {
                         gateway: harvest_app::gateway::GatewayConnector::new(
                             &service.gateway,
                             &service.service.state_dir,
-                            ticket,
                         ),
                     })
                 } else {
