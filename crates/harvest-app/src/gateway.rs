@@ -205,19 +205,16 @@ impl GatewayConnector {
         let identity = self.identity_paths();
 
         if !identity.ready() {
-            let ticket = self.ticket();
-            let ticket = ticket.as_deref().ok_or_else(|| {
-                "没有客户端证书，也没有接入券：等同栈 `harvest-bootstrap` 签一张，\
-                 或在网关页「签发接入券」后写进宿主 secret 文件"
-                    .to_string()
-            })?;
+            let ticket = self
+                .ticket()
+                .ok_or_else(|| no_identity_hint(&self.state_dir))?;
             enroll(
                 &self.settings,
                 endpoint,
                 &worker_id,
                 source_code,
                 &identity,
-                ticket,
+                ticket.as_str(),
             )
             .await?;
             // 券已用掉：留在盘上只是多一份凭据。
@@ -516,6 +513,18 @@ fn new_instance_id() -> String {
     format!("hinst-{}", std::process::id())
 }
 
+/// 「既没证书也没券」时告诉现场**把券放哪儿**。
+///
+/// 这句话是操作者在日志里唯一会看到的指引，所以必须带上采集器真正会去读的那个路径，
+/// 而不是泛指「到网关页签发」—— 券是一次性的，不进长期密钥库（`.wist/sec-value.yml`）。
+fn no_identity_hint(state_dir: &Path) -> String {
+    format!(
+        "没有客户端证书，也没有接入券：同栈部署等 `harvest-bootstrap` 自动接入；\
+         跨机部署在网关页「签发接入券」后，把券写成 {}（0600，一次一用，换到证书后自动删除）",
+        state_dir.join("enroll.ticket").display()
+    )
+}
+
 /// bootstrap 写在 `<state_dir>/enroll.ticket` 里的一次性接入券（还没换成证书时）。
 pub fn ticket_from_state_dir(state_dir: &Path) -> Option<String> {
     let path = state_dir.join("enroll.ticket");
@@ -676,6 +685,7 @@ mod tests {
 
     /// 没证书也没券：只能报错（带下一步该做什么），不能 panic。
     /// 这是 `run` 能“常驻重试”而不是“重启才恢复”的前提。
+    /// 报错必须**点名采集器真正会去读的那个文件**：现场只照这行日志操作。
     #[tokio::test]
     async fn connect_without_identity_or_ticket_explains_what_is_missing() {
         let state = tempfile::tempdir().expect("tempdir");
@@ -683,6 +693,15 @@ mod tests {
         assert!(!connector.identity_ready());
         let err = connector.connect().await.err().expect("no identity");
         assert!(err.contains("接入券"), "{err}");
+        let expected = state.path().join("enroll.ticket");
+        assert!(
+            err.contains(&expected.display().to_string()),
+            "要告诉现场写到哪个文件：{err}"
+        );
+        assert!(
+            !err.contains("sec-value.yml"),
+            "券是一次性的，不能指回长期密钥库：{err}"
+        );
     }
 
     /// 过期证书在**建连前**就被拦住，并且不读私钥、不发请求。
