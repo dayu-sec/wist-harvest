@@ -38,4 +38,4 @@ thiserror = "2"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "io-util", "net", "sync", "fs"] }
 tokio-rustls = "0.26"
 toml = "1"
-webpki-roots = "0.26"
+webpki-roots = "1.0"
