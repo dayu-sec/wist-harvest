@@ -546,11 +546,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "harvest-aliyun"
+version = "0.8.0"
+dependencies = [
+ "async-trait",
+ "base64 0.22.1",
+ "chrono",
+ "harvest-core",
+ "hmac",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "harvest-app"
-version = "0.7.2"
+version = "0.8.0"
 dependencies = [
  "chrono",
  "clap",
+ "harvest-aliyun",
  "harvest-aws",
  "harvest-core",
  "harvest-tencent",
@@ -566,7 +584,7 @@ dependencies = [
 
 [[package]]
 name = "harvest-aws"
-version = "0.7.2"
+version = "0.8.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -584,7 +602,7 @@ dependencies = [
 
 [[package]]
 name = "harvest-core"
-version = "0.7.2"
+version = "0.8.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -601,7 +619,7 @@ dependencies = [
 
 [[package]]
 name = "harvest-tencent"
-version = "0.7.2"
+version = "0.8.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -618,7 +636,7 @@ dependencies = [
 
 [[package]]
 name = "harvest-warp"
-version = "0.7.2"
+version = "0.8.0"
 dependencies = [
  "async-trait",
  "harvest-core",

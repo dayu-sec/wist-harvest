@@ -13,7 +13,6 @@ use harvest_core::cost::{
     COST_MANIFEST_SCHEMA, CostBasis, CostRange, CostShardWriter, PeriodSource,
 };
 use harvest_core::error::HarvestError;
-use harvest_core::model::Vendor;
 use serde_json::json;
 
 use crate::round::RoundConfig;
@@ -154,7 +153,7 @@ fn build_range(
 
     let range = CostRange {
         source_code: cfg.source.source_code.clone(),
-        vendor: Vendor::TencentCloud,
+        vendor: cfg.source.vendor(),
         billing_account_uin,
         cost_basis,
         period_start,
@@ -164,15 +163,15 @@ fn build_range(
     Ok(range)
 }
 
-/// 账单口径是 UIN。账号键是 `vendor:uin`，这里取后段。
+/// 账单口径是账号键（腾讯云 UIN、阿里云 AccountId），这里取后段。
 fn billing_account_uin(cfg: &RoundConfig) -> Result<String, String> {
     // 数据源里显式写了就用它（联调 / 代客采集时账号键与凭据可能不同）。
     if let Some(uin) = &cfg.source.billing_account {
         return Ok(uin.clone());
     }
     Err(
-        "数据源没有 `billing_account`：账单接口按账号记账（腾讯云是 UIN），不能从凭据里猜。\
-         请在 sources.d/<source>.toml 里写上 `billing_account = \"1000...\"`"
+        "数据源没有 `billing_account`：账单接口按账号记账（腾讯云是 UIN，阿里云是账号 ID），\
+         不能从凭据里猜。请在 sources.d/<source>.toml 里写上 `billing_account = \"1000...\"`"
             .to_string(),
     )
 }

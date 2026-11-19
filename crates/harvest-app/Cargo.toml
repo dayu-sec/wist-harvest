@@ -17,6 +17,7 @@ path = "src/main.rs"
 harvest-core.workspace = true
 harvest-tencent.workspace = true
 harvest-aws.workspace = true
+harvest-aliyun.workspace = true
 harvest-warp.workspace = true
 wist-api.workspace = true
 rcgen.workspace = true

@@ -17,14 +17,14 @@ wist-harvest ──DSNAP 快照帧（schema=atlas.in.inventory.v1）──► wa
 
 ## 范围
 
-- 采集组 `inventory`，四个类型；目前两家云：**腾讯云**、**AWS**。
+- 采集组 `inventory`，四个类型；目前三家云：**腾讯云**、**AWS**、**阿里云**。
 
-| 类型 | 腾讯云 | AWS | 备注 |
-| --- | --- | --- | --- |
-| `CLOUD_HOST` | `cvm.DescribeInstances` | `ec2.DescribeInstances` | 腾讯云每地域 1 道分页；AWS 用 `NextToken` 游标 |
-| `EIP` | `vpc.DescribeAddresses` | `ec2.DescribeAddresses` | 腾讯云**每地域 2 道**（`wanip`/`all`）按 `AddressId` 去重；AWS 1 道 |
-| `VPC` | `vpc.DescribeVpcs` | `ec2.DescribeVpcs` | 腾讯云 `Limit`/`Offset` 用字符串形式 |
-| `SUB_NET` | `vpc.DescribeSubnets` | `ec2.DescribeSubnets` | 同上 |
+| 类型 | 腾讯云 | AWS | 阿里云 | 备注 |
+| --- | --- | --- | --- | --- |
+| `CLOUD_HOST` | `cvm.DescribeInstances` | `ec2.DescribeInstances` | `ecs.DescribeInstances` | 腾讯云/阿里云每地域 1 道分页；AWS 用 `NextToken` 游标 |
+| `EIP` | `vpc.DescribeAddresses` | `ec2.DescribeAddresses` | `vpc.DescribeEipAddresses` | 腾讯云**每地域 2 道**（`wanip`/`all`）按 `AddressId` 去重；AWS/阿里云 1 道 |
+| `VPC` | `vpc.DescribeVpcs` | `ec2.DescribeVpcs` | `vpc.DescribeVpcs` | 腾讯云 `Limit`/`Offset` 用字符串形式；阿里云 `PageSize` 上限 50 |
+| `SUB_NET` | `vpc.DescribeSubnets` | `ec2.DescribeSubnets` | `vpc.DescribeVSwitches` | 阿里云 `PageSize` 上限 50 |
 
 - 状态机 `Planned → Fetching → Spooled → Verified → Published → Done`，
   任一步失败进 `Aborted` 且**数据平面零帧**。
@@ -56,7 +56,8 @@ wist-harvest ──DSNAP 快照帧（schema=atlas.in.inventory.v1）──► wa
 - `Completeness::{Total, Exhausted}`：**没有总数的云靠「游标耗尽」作为完整性证据**，
   不再出现「没有 TotalCount 就跳过校验」；
 - 凭据表 `[credential]` 的键名由厂商定义（腾讯云 `secret_id`/`secret_key`，
-  AWS `access_key_id`/`secret_access_key`/`session_token`），core 只负责「从哪读」与脱敏；
+  AWS `access_key_id`/`secret_access_key`/`session_token`，
+  阿里云 `access_key_id`/`access_key_secret`），core 只负责「从哪读」与脱敏；
 - `[vendor_options]` 由厂商 crate 强类型解析（`deny_unknown_fields`），core 不解析。
 
 ## 成本链路（并列主干，不进数据平面）
@@ -68,7 +69,8 @@ wist-harvest ──DSNAP 快照帧（schema=atlas.in.inventory.v1）──► wa
 | 类型 | 云 API | 备注 |
 | --- | --- | --- |
 | 账单明细（腾讯云） | `billing.DescribeBillDetail`（2018-07-09） | 单页上限 **300**（1000 会被 `#Limit` 拒）；按 `bill_month` 整月拉一遍，日口径在本地筛 |
-| 账单（AWS） | — | **尚未实现**：`cost` 会明确报错，不会静默按腾讯云跑 |
+| 账单明细（阿里云） | `business.QueryAccountBill`（2017-12-14） | 按 `BillingCycle` 整月拉一遍（`Granularity=DAILY`），日口径在本地按 `BillingDate` 筛 |
+| 账单（AWS） | — | **尚未实现**：`cost` 会明确报错，不会静默按其它厂商跑 |
 
 ```bash
 # 整月账单（CHARGE），默认上一个自然月
@@ -102,7 +104,7 @@ wist-harvest/
 ├── _gal/                       # gx 工作区（gx init project --path rust 生成）
 ├── version.txt                 # 版本唯一来源
 ├── Cargo.toml                  # workspace（版本 marker 在 [workspace.package]）
-├── docs/examples/              # harvest.toml + 腾讯云/AWS 的 sources.d 样例
+├── docs/examples/              # harvest.toml + 腾讯云/AWS/阿里云的 sources.d 样例
 ├── docker/                     # 运行镜像（build context 按架构提供预编译二进制）
 ├── .github/workflows/          # CI：build-and-test.yml + release.yml
 └── crates/
@@ -110,6 +112,7 @@ wist-harvest/
     │                           #   租约/限速/脱敏/状态机/调度/编排
     ├── harvest-tencent/        # TC3-HMAC-SHA256 签名 + 四个 reader + 字段归一
     ├── harvest-aws/            # SigV4 签名 + ec2 reader（XML / NextToken）+ STS 身份
+    ├── harvest-aliyun/         # RPC HMAC-SHA256 签名 + ecs/vpc reader + STS 身份
     ├── harvest-warp/           # 数据平面 sink：TLS + 长度前缀帧
     └── harvest-app/            # lib（once/run/dry-run/diagnose）+ bin `wist-harvest`
 ```
@@ -194,7 +197,7 @@ wist-harvest run --config ... --source ...
 退出码：`once` → `0` = `Done`；`2` = `Aborted`（已有报告与 spool）；`3` = 配置/凭据/数据源初始化失败。
 `run` 优雅退出后恒为 `0`；`diagnose` → 全 OK `0`，任一 FAIL `1`。
 
-配置文件样例见 [`docs/examples/`](docs/examples/)（腾讯云与 AWS 各一份）。
+配置文件样例见 [`docs/examples/`](docs/examples/)（腾讯云、AWS、阿里云各一份）。
 凭据永远不写在配置里，而且**键名由厂商定义**：
 
 ```toml
@@ -211,6 +214,12 @@ access_key_id     = { env = "SEC_AWS_ACCESS_KEY_ID" }
 secret_access_key = { env = "SEC_AWS_SECRET_ACCESS_KEY" }
 # session_token 可选（临时凭据）
 # 或 { file = "/path/secret.json", field = "secret_key" }（文件必须 0600）
+
+# 阿里云
+vendor = "ALIYUN"
+[credential]
+access_key_id     = { env = "SEC_ALIYUN_ACCESS_KEY_ID" }
+access_key_secret = { env = "SEC_ALIYUN_ACCESS_KEY_SECRET" }
 ```
 
 AWS 的专属参数放在 `[vendor_options]`（core 不解析，由 `harvest-aws` 强类型校验）：
@@ -326,7 +335,7 @@ spool/state 目录可写、数据平面端点可解析、是否有可续跑 spoo
 ## 取舍与偏离（P0 明确做了选择的地方）
 
 1. **没有 `harvest-source` crate。** 设计说明 §3 的目录里有一个独立的
-   `harvest-source`（`Source` 契约）。两家厂商（腾讯云/AWS）共用的只有接口与驱动，
+   `harvest-source`（`Source` 契约）。三家厂商（腾讯云/AWS/阿里云）共用的只有接口与驱动，
    量级还撑不起一个独立 crate，所以 `Source`/`Sink`/`CostSource` 契约与 `page` 驱动
    都在 `harvest-core`。真要再膨胀时再抽，改动只是 `pub use`。
 2. **`snap_id` 里的 `:` 换成 `-`。** 公式是 `{producer}-{scope_hash}-{ts}`，而
@@ -377,4 +386,6 @@ spool/state 目录可写、数据平面端点可解析、是否有可续跑 spoo
 - 调度：没有持久化"连续失败次数"，重启后退避从第 1 级重新开始；
 - AWS 的联调：真实签名/分区/STS 临时凭据（目前用固定向量 + mock 验证）；
   腾讯云的 `DescribeVpcs`/`DescribeSubnets` 字符串分页参数仍需真实账号确认；
+- 阿里云的联调：RPC 签名用固定向量 + mock 验证，仍需真实账号确认地域/字段形状；
+  `QueryAccountBill` 的 `Granularity=DAILY` 与按 `InstanceID` 聚合粒度也需要真实账单核对；
 - 单帧上限超限时的下游分片组装（设计 §9 缺口 2）。

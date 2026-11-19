@@ -156,15 +156,18 @@ pub enum Vendor {
     TencentCloud,
     #[serde(rename = "AWS", alias = "aws")]
     Aws,
+    #[serde(rename = "ALIYUN", alias = "aliyun", alias = "ali", alias = "alibaba")]
+    Aliyun,
 }
 
 impl Vendor {
-    pub const ALL: [Vendor; 2] = [Vendor::TencentCloud, Vendor::Aws];
+    pub const ALL: [Vendor; 3] = [Vendor::TencentCloud, Vendor::Aws, Vendor::Aliyun];
 
     pub fn as_str(self) -> &'static str {
         match self {
             Self::TencentCloud => "TENCENT_CLOUD",
             Self::Aws => "AWS",
+            Self::Aliyun => "ALIYUN",
         }
     }
 
@@ -174,6 +177,7 @@ impl Vendor {
         match self {
             Self::TencentCloud => "tencent",
             Self::Aws => "aws",
+            Self::Aliyun => "aliyun",
         }
     }
 
@@ -186,6 +190,7 @@ impl Vendor {
         match self {
             Self::TencentCloud => "tencent",
             Self::Aws => "aws",
+            Self::Aliyun => "aliyun",
         }
     }
 }
@@ -622,5 +627,8 @@ mod tests {
         // `as_str` 是上报给人看的；`key` 是下游相等比较用的 `cloud_account` 前缀。
         assert_eq!(Vendor::TencentCloud.as_str(), "TENCENT_CLOUD");
         assert_eq!(Vendor::TencentCloud.key(), "tencent");
+        assert_eq!(Vendor::Aliyun.as_str(), "ALIYUN");
+        assert_eq!(Vendor::Aliyun.key(), "aliyun");
+        assert_eq!(Vendor::Aliyun.config_name(), "aliyun");
     }
 }

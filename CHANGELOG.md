@@ -3,6 +3,23 @@
 本文件记录 `wist-harvest` 的所有重要变更。格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.8.0-alpha] - 2026-11-20
+
+**新增阿里云（`vendor = "ALIYUN"`）：库存 + 成本两条链路。**
+
+- 新 crate `harvest-aliyun`：RPC 风格签名（`SignatureVersion=1.0` + `HMAC-SHA256`，
+  `SignatureMethod=HMAC-SHA256`）、`ecs`/`vpc` 四个 reader、`sts:GetCallerIdentity` 账号身份；
+- 资产：`ecs.DescribeInstances`（`CLOUD_HOST`）、`vpc.DescribeEipAddresses`（`EIP`，
+  每地域 1 道）、`vpc.DescribeVpcs`（`VPC`）、`vpc.DescribeVSwitches`（`SUB_NET`）；
+- 分页：`PageNumber`/`PageSize`/`TotalCount`，并按接口上限夹紧 `PageSize`
+  （ECS/EIP 100，VPC/VSwitch 50）；短页即最后一页，避免 `PageNumber` 分页跳行；
+- 字段：`Memory` 从 MB 归一成契约要求的 GB；`ResourceGroupId` 落到 `project_id`，
+  `project_name` 为空（阿里云没有腾讯云的项目维度）；
+- 成本：`business.QueryAccountBill`（`2017-12-14`，`Granularity=DAILY`），金额走
+  `DecimalSum` 按十进制字符串累加；`billing_account` 写阿里云账号 ID；
+- `cost` 的范围 `vendor` 改为跟随数据源配置（原来写死 `TENCENT_CLOUD`）；
+- `sources.d` 样例：`docs/examples/aliyun-prod.toml`。
+
 ## [0.7.2-alpha] - 2026-11-15
 
 **删掉“人工投券”这条路：`run` 不再自己接入。**

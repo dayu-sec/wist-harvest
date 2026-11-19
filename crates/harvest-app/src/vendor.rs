@@ -20,12 +20,15 @@ pub async fn build_source(
         Vendor::Aws => Ok(Box::new(
             harvest_aws::AwsSource::init(cfg.clone(), svc).await?,
         )),
+        Vendor::Aliyun => Ok(Box::new(
+            harvest_aliyun::AliyunSource::init(cfg.clone(), svc).await?,
+        )),
     }
 }
 
 /// 按配置里的 `vendor` 构建成本源。
 ///
-/// 目前只有腾讯云实现了账单 reader；AWS 明确报「未实现」，而不是悄悄按腾讯云跑。
+/// 腾讯云与阿里云实现了账单 reader；AWS 明确报「未实现」，而不是悄悄按别的云跑。
 pub async fn build_cost_source(
     cfg: &SourceConfig,
     svc: &ServiceConfig,
@@ -34,9 +37,12 @@ pub async fn build_cost_source(
         Vendor::TencentCloud => Ok(Box::new(
             harvest_tencent::TencentSource::init(cfg.clone(), svc).await?,
         )),
+        Vendor::Aliyun => Ok(Box::new(
+            harvest_aliyun::AliyunSource::init(cfg.clone(), svc).await?,
+        )),
         Vendor::Aws => Err(HarvestError::new(
             ErrorClass::InvalidParam,
-            "AWS 账单采集尚未实现（成本契约 v1 目前只有腾讯云）",
+            "AWS 账单采集尚未实现（成本契约 v1 目前只有腾讯云与阿里云）",
         )),
     }
 }
@@ -48,6 +54,7 @@ pub fn plan_from_config(cfg: &SourceConfig) -> Result<Vec<WorkItem>, HarvestErro
     match cfg.vendor() {
         Vendor::TencentCloud => harvest_tencent::plan_from_config(cfg),
         Vendor::Aws => harvest_aws::plan_from_config(cfg),
+        Vendor::Aliyun => harvest_aliyun::plan_from_config(cfg),
     }
 }
 
@@ -56,5 +63,6 @@ pub fn required_credentials(vendor: Vendor) -> &'static [&'static str] {
     match vendor {
         Vendor::TencentCloud => harvest_tencent::REQUIRED_CREDENTIALS,
         Vendor::Aws => harvest_aws::REQUIRED_CREDENTIALS,
+        Vendor::Aliyun => harvest_aliyun::REQUIRED_CREDENTIALS,
     }
 }

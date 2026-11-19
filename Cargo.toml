@@ -4,12 +4,13 @@ members = [
     "crates/harvest-core",
     "crates/harvest-tencent",
     "crates/harvest-aws",
+    "crates/harvest-aliyun",
     "crates/harvest-warp",
     "crates/harvest-app",
 ]
 
 [workspace.package]
-version = "0.7.2" #@gxl:set(version)
+version = "0.8.0" #@gxl:set(version)
 edition = "2024"
 publish = false
 license = "Apache-2.0"
@@ -18,11 +19,13 @@ license = "Apache-2.0"
 harvest-core = { path = "crates/harvest-core" }
 harvest-tencent = { path = "crates/harvest-tencent" }
 harvest-aws = { path = "crates/harvest-aws" }
+harvest-aliyun = { path = "crates/harvest-aliyun" }
 harvest-warp = { path = "crates/harvest-warp" }
 # 工作授权报文与网关共用一份定义（`wist-api::harvest_work`）；本地开发用 path patch。
 wist-api = "0.12"
 
 async-trait = "0.1"
+base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std", "serde"] }
 clap = { version = "4", features = ["derive"] }
 hex = "0.4"
