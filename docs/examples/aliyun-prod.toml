@@ -5,6 +5,8 @@
 #   - `[credential]` 用 AccessKey：`access_key_id` / `access_key_secret`
 #   - EIP 只有一路（阿里云接口直接返回全部 EIP，没有 WanIP/EIP 两道过滤）
 #   - 没有项目（Project）维度：实例的 `ResourceGroupId` 落到 `project_id`
+#
+# RAM 只读账号怎么建、需要哪些 action、常见错误：见 ../aliyun-account.md。
 
 source_code = "aliyun-prod"
 vendor = "ALIYUN"

@@ -8,8 +8,16 @@
 //!
 //! 顺序不能反：worker 行是 `enroll` 时建立的，先建 standing 会 404（`harvest_worker_not_found`）。
 //!
-//! 幂等：已有证书 / 已有 standing 就跳过。**失败不阻断采集**：`run` 自己会重试接入，
-//! 这里退出 0 并留一条 warn，只有“配置自相矛盾”这种改不改都跑不起来的情况才退出 3。
+//! 幂等：已有证书 / 已有 standing 就跳过。
+//!
+//! 失败边界（避免“容器 healthy 但永远采不到”）：
+//! - **网关未就绪 / 签券 / 接入失败 → 退出 3**：没有身份或控制面不可用时启动 `harvest`
+//!   没有意义，而且 compose 的 `service_completed_successfully` 正好把问题拦在 `up`；
+//! - **standing 查询/建立失败 → 只告警并退出 0**：worker 已存在，`harvest` 可以启动、
+//!   在页面授权或下次重启重试；不把整个服务卡在授权这一层；
+//! - 配置自相矛盾（配置读不出 / `source_code` 不一致 / TLS 配置非法）→ 退出 3。
+//!
+//! 换 `source_code` 后旧证书不能复用：bootstrap 会先把旧身份目录改名备份，再重新接入。
 
 use std::path::Path;
 use std::time::Duration;
@@ -50,37 +58,55 @@ async fn run_inner(config_path: &Path, source_path: &Path) -> Result<(), String>
 
     let endpoint = config.gateway.endpoint.trim().trim_end_matches('/');
     let http = gateway::plain_client(&config.gateway)?;
+    // 控制面不可用时不要启动一个“没有身份、永远不会采”的 harvest：直接让 up 失败。
     wait_gateway(&http, endpoint).await?;
 
-    // ① 身份：缺就接入。
+    // ① 身份：缺就接入；证书身份与当前 `source_code` 不一致时先备份再重新接入。
     //
     //    **只有一条路**：用管理面 token 向网关现签一张一次性券，拿到当场换证书，然后丢掉。
     //    券既不落盘、也没有“现场投放”这个入口 —— 采集器只作为栈的服务存在，接接入是
     //    bootstrap 的事；留一条读券文件的路只会制造靠属主/时机都对的隐式旁路。
     let connector = GatewayConnector::new(&config.gateway, &config.service.state_dir);
+    let mut identity_ok = false;
+    // 证书身份与当前 source_code 不一致时，**先拿到 ticket 再备份旧身份**：
+    // 否则签券失败（admin token 缺失/网关拒绝）会把本来还能用的旧身份先挪走。
+    let mut rotate = false;
     if connector.identity_ready() {
-        println!(
-            "身份已存在：{}（跳过接入）",
-            connector.identity_dir().display()
-        );
-    } else {
-        let mut enrolled = false;
-        match mint_ticket(&http, endpoint, &config, &source.source_code).await? {
-            Some(ticket) => {
-                redact::register_secret(&ticket);
-                if let Err(err) = connector.enroll(&ticket).await {
-                    redact::warn(format!("接入网关失败（run 会按拍重试）：{err}"));
-                } else {
-                    enrolled = true;
-                }
+        let expected = connector.worker_id();
+        match connector.identity_worker_id() {
+            Ok(Some(cn)) if cn != expected => {
+                redact::warn(format!(
+                    "客户端证书身份 {cn} 与当前 {expected} 不一致（换过 source_code）：将重新接入"
+                ));
+                rotate = true;
             }
-            None => redact::warn(
-                "拿不到管理面 token：跳过接入（补上 [gateway].admin_token 后 `gops run start` 会重跑）",
-            ),
+            Ok(_) => {
+                println!(
+                    "身份已存在：{}（跳过接入）",
+                    connector.identity_dir().display()
+                );
+                identity_ok = true;
+            }
+            Err(err) => redact::warn(format!("读取客户端证书身份失败（按未接入处理）：{err}")),
         }
-        if !enrolled {
-            redact::warn("尚未接入：跳过初始授权（接入后到页面「云资产采集」卡授权）");
-            return Ok(());
+    }
+
+    if !identity_ok {
+        let ticket = mint_ticket(&http, endpoint, &config, &source.source_code)
+            .await
+            .map_err(|err| format!("签发接入券失败：{err}"))?;
+        if rotate {
+            match connector.backup_identity() {
+                Ok(backup) => {
+                    redact::warn(format!("旧身份已备份到 {}，重新接入", backup.display()))
+                }
+                Err(err) => redact::warn(format!("旧身份备份失败（仍尝试重新接入）：{err}")),
+            }
+        }
+        redact::register_secret(&ticket);
+        if let Err(err) = connector.enroll(&ticket).await {
+            // 接入失败 = 没有身份；不要启动一个永远不会采的 harvest。
+            return Err(format!("接入网关失败：{err}"));
         }
     }
 
@@ -119,12 +145,26 @@ async fn run_inner(config_path: &Path, source_path: &Path) -> Result<(), String>
             return Ok(());
         }
     };
-    if works_has_worker(&http, endpoint, &admin, &worker_id).await? {
-        println!("standing 已存在（跳过初始授权）");
-        return Ok(());
+    match works_has_worker(&http, endpoint, &admin, &worker_id).await {
+        Ok(true) => {
+            println!("standing 已存在（跳过初始授权）");
+            return Ok(());
+        }
+        Ok(false) => {}
+        Err(err) => {
+            redact::warn(format!(
+                "查询工作授权失败（跳过初始授权，harvest 仍会启动）：{err}"
+            ));
+            return Ok(());
+        }
     }
     let spec = spec_from_source(&source, &cadence_at(), cadence_jitter());
-    put_standing(&http, endpoint, &admin, &worker_id, &spec).await?;
+    if let Err(err) = put_standing(&http, endpoint, &admin, &worker_id, &spec).await {
+        redact::warn(format!(
+            "建立初始 standing 失败（harvest 仍会启动；可在页面授权或下次重启重试）：{err}"
+        ));
+        return Ok(());
+    }
     println!("已建立初始 standing：{worker_id}（plan_version=1）");
     Ok(())
 }
@@ -140,20 +180,14 @@ fn admin_token(config: &ServiceConfig) -> Result<String, String> {
     Ok(secret.expose().to_string())
 }
 
-/// 签一张接入券；**没有 admin token 时不报错**（返回 `None`，交给 run 重试）。
+/// 签一张接入券；拿不到 admin token 也算失败（没有身份就无法工作）。
 async fn mint_ticket(
     http: &reqwest::Client,
     endpoint: &str,
     config: &ServiceConfig,
     source_code: &str,
-) -> Result<Option<String>, String> {
-    let admin = match admin_token(config) {
-        Ok(admin) => admin,
-        Err(err) => {
-            redact::warn(format!("{err}；跳过自动接入"));
-            return Ok(None);
-        }
-    };
+) -> Result<String, String> {
+    let admin = admin_token(config)?;
     let url = format!("{endpoint}/api/v1/admin/harvest/enroll-ticket");
     let response = http
         .post(&url)
@@ -179,7 +213,7 @@ async fn mint_ticket(
     value
         .get("ticket")
         .and_then(Value::as_str)
-        .map(|ticket| Some(ticket.to_string()))
+        .map(str::to_string)
         .ok_or_else(|| "接入券响应里没有 ticket".to_string())
 }
 

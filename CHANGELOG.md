@@ -3,6 +3,17 @@
 本文件记录 `wist-harvest` 的所有重要变更。格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.8.1-alpha] - 2026-11-20
+
+- docs：新增 [`docs/aliyun-account.md`](docs/aliyun-account.md)——RAM 只读账号创建、最小权限
+  策略、接入配置、权限验证与 `Forbidden.RAM` / `harvest_worker_not_found` 排障。
+- **bootstrap 的失败边界更合理**：网关未就绪 / 签券失败 / 接入失败仍然退出 3（没有身份
+  启动 `harvest` 只会空转）；只有 **standing 查询/建立失败** 改为告警并退出 0，让
+  `harvest` 启动、在页面授权或下次重启重试。RAM 权限不足始终只影响采集轮次（`Aborted`），
+  不影响启动。
+- **换 `source_code` 后旧身份自动处理**：证书 CN 与当前 `worker_id` 不一致时，bootstrap 先
+  把身份目录改名备份、再重新接入；`run` 在建连前也会拒绝错身份的证书并给出处置。
+
 ## [0.8.0-alpha] - 2026-11-20
 
 **新增阿里云（`vendor = "ALIYUN"`）：库存 + 成本两条链路。**

@@ -122,10 +122,32 @@ where
                 QUERY_ACCOUNT_BILL.name
             )));
         }
+        // `PageNum` 分页按固定 PageSize 翻页：非末页返回短页时，下一页会**跳过**
+        // 短掉的那段（例如第 1 页只给 10 条却按 300 条翻到第 2 页）。宁可中止，
+        // 也不能少账；月账单的缺口是永久性的。
+        if (items.len() as u64) < PAGE_LIMIT && fetched < page_total {
+            return Err(HarvestError::integrity(format!(
+                "{} 在 page {page} 返回 {} 条（PageSize {PAGE_LIMIT}）但 total 还有 {page_total}：\
+                 短页会导致后续分页跳行",
+                QUERY_ACCOUNT_BILL.name,
+                items.len()
+            )));
+        }
         if fetched >= page_total {
             break;
         }
         page += 1;
+    }
+
+    // 最终行数必须与云端总数一致：多出来的行（`TotalCount` 少报）同样不能发布。
+    if let Some(total) = total
+        && stat.rows != total
+    {
+        return Err(HarvestError::integrity(format!(
+            "{} 账单总数不一致：云端 TotalCount={total}，实收={}",
+            QUERY_ACCOUNT_BILL.name, stat.rows
+        ))
+        .with_action(QUERY_ACCOUNT_BILL.name));
     }
 
     Ok(stat)

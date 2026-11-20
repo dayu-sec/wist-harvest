@@ -105,6 +105,7 @@ wist-harvest/
 ├── version.txt                 # 版本唯一来源
 ├── Cargo.toml                  # workspace（版本 marker 在 [workspace.package]）
 ├── docs/examples/              # harvest.toml + 腾讯云/AWS/阿里云的 sources.d 样例
+├── docs/aliyun-account.md      # 阿里云 RAM 只读账号、最小权限与排障
 ├── docker/                     # 运行镜像（build context 按架构提供预编译二进制）
 ├── .github/workflows/          # CI：build-and-test.yml + release.yml
 └── crates/
@@ -221,6 +222,9 @@ vendor = "ALIYUN"
 access_key_id     = { env = "SEC_ALIYUN_ACCESS_KEY_ID" }
 access_key_secret = { env = "SEC_ALIYUN_ACCESS_KEY_SECRET" }
 ```
+
+阿里云 RAM 只读账号怎么建、需要哪几个 action、以及 `Forbidden.RAM` / 换 `source_code`
+后重新接入的排障步骤，见 [`docs/aliyun-account.md`](docs/aliyun-account.md)。
 
 AWS 的专属参数放在 `[vendor_options]`（core 不解析，由 `harvest-aws` 强类型校验）：
 
@@ -374,6 +378,8 @@ spool/state 目录可写、数据平面端点可解析、是否有可续跑 spoo
 
 - **AWS 的成本链路**（CUR / Cost Explorer）—— `cost` 对 AWS 会明确报错；
   接入前需要和 `wist-cost` 一起把契约里的 `vendor` 枚举与账单口径定版；
+- **`wist-cost` 的 vendor 枚举**目前只认 `TENCENT_CLOUD`：阿里云账单 manifest 需要它扩到
+  `ALIYUN`，否则 `cost` 产物会被消费方拒收；
 - 成本：18 个月回填的编排（现在是「一个范围跑一次」，外层脚本串）；COS 直传（现在只写本地目录）；
 - `exposure` 组（安全组 + 规则、路由、对等连接、NAT/CCN、CLB）；
 - `env_ref` 的语义（设计 §9 缺口 3）：当前按配置直传，不做账号/项目/VPC 的切分推导；

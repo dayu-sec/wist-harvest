@@ -188,6 +188,40 @@ impl GatewayConnector {
         self.identity_paths().dir
     }
 
+    /// 当前客户端证书的身份（证书 CN，形如 `harvest:aliyun-prod`）。
+    ///
+    /// 换 `source_code` 后旧证书不能复用：这里让 bootstrap 能发现“证书身份 ≠ 当前配置的
+    /// worker_id”，而不是带着旧证书连上去、再在网关侧撞 `harvest_worker_not_found`。
+    pub fn identity_worker_id(&self) -> Result<Option<String>, String> {
+        let paths = self.identity_paths();
+        if !paths.cert.is_file() {
+            return Ok(None);
+        }
+        let pem = std::fs::read_to_string(&paths.cert)
+            .map_err(|err| format!("读取客户端证书失败 {}：{err}", paths.cert.display()))?;
+        certificate_common_name_from_pem(&pem)
+    }
+
+    /// 把现有身份目录改名备份（不删除）。返回备份后的路径。
+    pub fn backup_identity(&self) -> Result<PathBuf, String> {
+        let paths = self.identity_paths();
+        if !paths.dir.exists() {
+            return Ok(paths.dir);
+        }
+        let stamp = chrono::Utc::now().format("%Y%m%dT%H%M%S%.3fZ");
+        let backup = paths
+            .dir
+            .with_file_name(format!("identity.bak-{stamp}-{}", std::process::id()));
+        std::fs::rename(&paths.dir, &backup).map_err(|err| {
+            format!(
+                "备份客户端身份失败 {} → {}：{err}",
+                paths.dir.display(),
+                backup.display()
+            )
+        })?;
+        Ok(backup)
+    }
+
     /// 建一个可用客户端。**失败只返回错误**（不落任何状态），调用方决定退避节奏。
     pub async fn connect(&self) -> Result<GatewayClient, String> {
         let endpoint = self.settings.endpoint.trim().trim_end_matches('/');
@@ -239,6 +273,18 @@ impl GatewayConnector {
 
         let cert = std::fs::read_to_string(&identity.cert)
             .map_err(|err| format!("读取客户端证书失败 {}：{err}", identity.cert.display()))?;
+        // 证书身份必须与当前 `source_code` 对应的 worker_id 一致。
+        // 不一致时不要“先连上去再说”：网关会按证书认 worker，后续 work:poll / standing
+        // 都会指向另一个身份，症状是“连上了但永远没有活”。这里直接给出可用处置。
+        if let Some(cn) = certificate_common_name_from_pem(&cert)?
+            && cn != worker_id
+        {
+            return Err(format!(
+                "客户端证书身份是 {cn}，与当前 [gateway].source_code 对应的 {worker_id} 不一致：\
+                 换 source_code 后旧证书不能复用。把 {} 改名备份后重启，bootstrap 会重新接入。",
+                identity.dir.display()
+            ));
+        }
         let key = std::fs::read_to_string(&identity.key)
             .map_err(|err| format!("读取客户端私钥失败 {}：{err}", identity.key.display()))?;
         let http = mtls_client(&self.settings, &cert, &key)?;
@@ -313,6 +359,22 @@ fn certificate_expiry(cert_path: &Path) -> Result<Expiry, String> {
     let pem = std::fs::read_to_string(cert_path)
         .map_err(|err| format!("读取客户端证书失败 {}：{err}", cert_path.display()))?;
     certificate_expiry_from_pem(&pem, Utc::now())
+}
+
+/// 客户端证书的 CN（网关签出来的形态是 `harvest:<source_code>`）。
+fn certificate_common_name_from_pem(pem: &str) -> Result<Option<String>, String> {
+    use x509_parser::prelude::{FromDer, X509Certificate};
+
+    let (_, parsed) = x509_parser::pem::parse_x509_pem(pem.as_bytes())
+        .map_err(|err| format!("客户端证书不是合法 PEM：{err:?}"))?;
+    let (_, certificate) = X509Certificate::from_der(&parsed.contents)
+        .map_err(|err| format!("客户端证书无法解析：{err}"))?;
+    Ok(certificate
+        .subject()
+        .iter_common_name()
+        .next()
+        .and_then(|cn| cn.as_str().ok())
+        .map(str::to_string))
 }
 
 fn certificate_expiry_from_pem(pem: &str, now: DateTime<Utc>) -> Result<Expiry, String> {
@@ -545,9 +607,16 @@ mod tests {
     }
 
     fn self_signed_pem(not_after_days: i64) -> String {
+        self_signed_pem_with_cn("harvest.test", not_after_days)
+    }
+
+    fn self_signed_pem_with_cn(cn: &str, not_after_days: i64) -> String {
         let key_pair = rcgen::KeyPair::generate().expect("key");
         let mut params =
             rcgen::CertificateParams::new(vec!["harvest.test".to_string()]).expect("params");
+        params
+            .distinguished_name
+            .push(rcgen::DnType::CommonName, cn);
         params.not_before = rcgen::date_time_ymd(2024, 1, 1);
         let expiry = Utc::now() + chrono::Duration::days(not_after_days);
         params.not_after = rcgen::date_time_ymd(
@@ -577,6 +646,53 @@ mod tests {
     #[test]
     fn rejects_a_certificate_that_is_not_a_certificate() {
         assert!(certificate_expiry_from_pem("not a pem", Utc::now()).is_err());
+    }
+
+    #[test]
+    fn certificate_common_name_is_read_from_the_certificate() {
+        let pem = self_signed_pem_with_cn("harvest:tencent-cloud-prod", 30);
+        assert_eq!(
+            certificate_common_name_from_pem(&pem)
+                .expect("parse")
+                .as_deref(),
+            Some("harvest:tencent-cloud-prod")
+        );
+    }
+
+    /// 换 `source_code` 后，旧证书连上去也不会拿到活；必须在建连前拦住并给出处置。
+    #[tokio::test]
+    async fn a_certificate_for_another_source_code_is_refused_with_a_fix() {
+        let state = tempfile::tempdir().expect("tempdir");
+        let identity = state.path().join("identity");
+        std::fs::create_dir_all(&identity).expect("identity dir");
+        std::fs::write(
+            identity.join("client.crt"),
+            self_signed_pem_with_cn("harvest:tencent-cloud-prod", 30),
+        )
+        .expect("cert");
+        std::fs::write(identity.join("client.key"), "not a key").expect("key");
+
+        let mut settings = settings();
+        settings.source_code = "aliyun-prod".to_string();
+        let connector = GatewayConnector::new(&settings, state.path());
+        let err = connector.connect().await.err().expect("mismatch");
+        assert!(err.contains("不一致"), "{err}");
+        assert!(err.contains("harvest:tencent-cloud-prod"), "{err}");
+        assert!(err.contains("备份"), "{err}");
+    }
+
+    #[test]
+    fn backup_identity_renames_without_deleting() {
+        let state = tempfile::tempdir().expect("tempdir");
+        let identity = state.path().join("identity");
+        std::fs::create_dir_all(&identity).expect("identity dir");
+        std::fs::write(identity.join("client.crt"), "cert").expect("cert");
+        std::fs::write(identity.join("client.key"), "key").expect("key");
+
+        let connector = GatewayConnector::new(&settings(), state.path());
+        let backup = connector.backup_identity().expect("backup");
+        assert!(!identity.exists(), "旧身份目录应被改名");
+        assert!(backup.join("client.crt").is_file(), "备份里证书还在");
     }
 
     /// 续期窗口的边界按秒判定（不在当天/当分上模糊）。

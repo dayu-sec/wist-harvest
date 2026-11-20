@@ -308,10 +308,10 @@ pub fn classify_code(code: &str) -> ErrorClass {
         || code.starts_with("SignatureDoesNotMatch")
         || code.starts_with("IncompleteSignature")
         || code.starts_with("InvalidSecurityToken")
-        || matches!(
-            code,
-            "Forbidden" | "NoPermission" | "Unauthorized" | "NotAuthorized"
-        )
+        || code.starts_with("Forbidden")
+        || code.starts_with("NoPermission")
+        || code.starts_with("Unauthorized")
+        || code.starts_with("NotAuthorized")
     {
         return ErrorClass::Auth;
     }
@@ -348,6 +348,8 @@ mod tests {
             ErrorClass::Auth
         );
         assert_eq!(classify_code("SignatureDoesNotMatch"), ErrorClass::Auth);
+        assert_eq!(classify_code("Forbidden.RAM"), ErrorClass::Auth);
+        assert_eq!(classify_code("NoPermission.Action"), ErrorClass::Auth);
         assert_eq!(
             classify_code("InvalidParameterValue"),
             ErrorClass::InvalidParam

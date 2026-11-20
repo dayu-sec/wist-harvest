@@ -14,8 +14,12 @@ use std::sync::Mutex;
 
 use async_trait::async_trait;
 use harvest_aliyun::AliyunSource;
-use harvest_core::config::{ServiceConfig, SourceConfig};
+use harvest_aliyun::client::{AliyunClient, ClientOptions};
+use harvest_core::config::{SecretString, ServiceConfig, SourceConfig};
+use harvest_core::cost::{CostBasis, CostRange};
 use harvest_core::error::HarvestError;
+use harvest_core::model::Vendor;
+use harvest_core::ratelimit::{RateLimiter, RateSpec};
 use harvest_core::run::{RunOptions, run_once};
 use harvest_core::source::{CompleteSnapshot, PublishAck, Sink, Source};
 use harvest_core::state::RunState;
@@ -336,6 +340,123 @@ fn body_of(frame: &CompleteSnapshot) -> Value {
         .position(|w| w == symbol)
         .expect("记录里必须有 DSNAP: 符号");
     serde_json::from_slice(&frame.bytes[at + symbol.len()..]).expect("正文是 JSON")
+}
+
+fn cost_client(base: &str) -> AliyunClient {
+    AliyunClient::new(
+        SecretString::new("ALIYUNTESTACCESSKEYID"),
+        SecretString::new("ALIYUNTESTSECRETVALUE"),
+        Arc::new(RateLimiter::new(RateSpec::default(), Default::default())),
+        ClientOptions {
+            endpoint_override: Some(base.to_string()),
+            ..Default::default()
+        },
+    )
+    .expect("client")
+}
+
+fn daily_range() -> CostRange {
+    let day = chrono::NaiveDate::from_ymd_opt(2026, 10, 15).expect("date");
+    CostRange {
+        source_code: "aliyun-prod".into(),
+        vendor: Vendor::Aliyun,
+        billing_account_uin: "1234567890".into(),
+        cost_basis: CostBasis::Consumption,
+        period_start: day,
+        period_end: day,
+    }
+}
+
+fn bill_row(instance: &str) -> Value {
+    json!({
+        "BillAccountID": "1234567890",
+        "ProductCode": "ecs",
+        "ProductName": "云服务器ECS",
+        "BillingItem": "云服务器ECS按量付费",
+        "InstanceID": instance,
+        "BillingDate": "2026-10-15",
+        "PretaxAmount": "1.00",
+        "Currency": "CNY"
+    })
+}
+
+#[tokio::test]
+async fn cost_fetch_reads_every_row() {
+    let handler: Handler = Arc::new(|action: &str, _params: &Value| {
+        assert_eq!(action, "QueryAccountBill");
+        json!({
+            "RequestId": "req-bill",
+            "Success": true,
+            "Code": "Success",
+            "Data": {
+                "BillingCycle": "2026-10",
+                "TotalCount": 2,
+                "PageNum": 1,
+                "PageSize": 300,
+                "Items": {"Item": [bill_row("i-1"), bill_row("i-2")]}
+            }
+        })
+    });
+    let mock = MockApi::spawn(handler).await;
+    let client = cost_client(&mock.base);
+    let mut seen = 0u64;
+    let stat = harvest_aliyun::readers::billing::fetch_range(&client, &daily_range(), |_row| {
+        seen += 1;
+        Ok(())
+    })
+    .await
+    .expect("成本抓取");
+    assert_eq!(stat.rows, 2);
+    assert_eq!(seen, 2);
+    assert_eq!(stat.pages, 1);
+}
+
+#[tokio::test]
+async fn cost_short_page_before_total_is_an_integrity_error() {
+    // PageNum 分页：非末页短页会让下一页跳行，必须中止而不是少账。
+    let handler: Handler = Arc::new(|_action: &str, _params: &Value| {
+        json!({
+            "RequestId": "req-bill-short",
+            "Success": true,
+            "Code": "Success",
+            "Data": {
+                "BillingCycle": "2026-10",
+                "TotalCount": 5,
+                "Items": {"Item": [bill_row("i-1"), bill_row("i-2")]}
+            }
+        })
+    });
+    let mock = MockApi::spawn(handler).await;
+    let client = cost_client(&mock.base);
+    let err = harvest_aliyun::readers::billing::fetch_range(&client, &daily_range(), |_row| Ok(()))
+        .await
+        .expect_err("短页必须失败");
+    assert_eq!(err.class, harvest_core::ErrorClass::Integrity);
+    assert!(err.message.contains("短页"), "{}", err.message);
+}
+
+#[tokio::test]
+async fn cost_extra_rows_beyond_total_is_an_integrity_error() {
+    // 云端少报总数、实际多给行：同样不能发布（少报的行会永远对不上）。
+    let handler: Handler = Arc::new(|_action: &str, _params: &Value| {
+        json!({
+            "RequestId": "req-bill-extra",
+            "Success": true,
+            "Code": "Success",
+            "Data": {
+                "BillingCycle": "2026-10",
+                "TotalCount": 1,
+                "Items": {"Item": [bill_row("i-1"), bill_row("i-2")]}
+            }
+        })
+    });
+    let mock = MockApi::spawn(handler).await;
+    let client = cost_client(&mock.base);
+    let err = harvest_aliyun::readers::billing::fetch_range(&client, &daily_range(), |_row| Ok(()))
+        .await
+        .expect_err("多出的行必须失败");
+    assert_eq!(err.class, harvest_core::ErrorClass::Integrity);
+    assert!(err.message.contains("总数不一致"), "{}", err.message);
 }
 
 // ---------------------------------------------------------------------------
